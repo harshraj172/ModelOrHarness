@@ -51,3 +51,32 @@ category, then commits to it): category F1 0.80, covering 35 of 40 examples.
 **REPRODUCE.md** has the full Table 2/3 breakdown, the ensemble table at every
 agreement threshold, and the exact commands to regenerate all of this from the stored
 predictions. No key or network needed.
+
+## Data-integrity notes (audit, 2026-09-02)
+
+- `predictions/*/manifest.json` files were DELETED: their score blocks were
+  stale (written mid-run at n=39) and disagreed with the dossiers on disk.
+  The dossiers are the source of truth; `plot/score_tables.py` recomputes
+  everything from them and matches the paper exactly.
+- `predictions/opus-4.8_3turn_base__20260618-160352/` (an earlier,
+  lower-scoring Opus-4.8 run superseded by `__224835`, referenced by no
+  script) was removed; it survives in git history.
+- KNOWN QUIRK, left as-is: `gpt-5.5-xhigh_3turn-oracle_none__20260618-142516/dossiers/`
+  E12..E23 carry internal `id` fields shifted by -1 (E12.json says "E11").
+  The FILENAME is authoritative -- each dossier's embedded gold matches
+  `data/examples.jsonl` under its filename. That run also has 39 dossiers
+  (E11 absent), which is why Table 2's GPT-5.5 gold-category column is over
+  39 examples while other rows use 40.
+- `gold.vulnerability` in `data/examples.jsonl` was restored 2026-09-02 from
+  the paper's published Table 5 (tab:risk): 15 examples across 6 categories.
+  Older dossiers carry an earlier F1-F8 coding that the paper revised during
+  writing (E12/E13 re-binned to Rogue Agents; the F4 group narrowed); the
+  historical codes remain readable in `predictions/*/dossiers/*.json`.
+- KNOWN COUNT DRIFT: `judge/taxonomy.py` enumerates 42 (edge, mode) rows /
+  38 unique mode names; the paper and this README say "41 failure modes
+  (36 model, 5 non-model)". The canonical count is 41 -- taxonomy.py
+  over-splits by one; reconcile before using taxonomy.py as the vocabulary
+  of record.
+- Figures 1-2 generators live in `figures_src/` (added 2026-09-02); see its
+  README for exactness status (Fig 2 byte-identical; Fig 1 environment-
+  sensitive, authoritative PDF kept in `figures_src/reference/`).
