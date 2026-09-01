@@ -1,0 +1,443 @@
+{
+ "id": "E32",
+ "gold": {
+  "edge": "model — tool",
+  "fault_side": "model",
+  "failure_mode": "Tool Recovery Failure",
+  "vulnerability": "none"
+ },
+ "pred": {
+  "edge": "model — tool",
+  "fault_side": "model",
+  "failure_mode": "Tool Recovery Failure",
+  "category": "model — tool (fault: model)"
+ },
+ "evidence": "Under ToolMaze C1_task_089 P1 (Explicit-Transient), the victim tool convert_datetime returns an explicit HTTP-500 error on its first call and succeeds on retry. MiniMax-M2.7 called convert_datetime exactly once, received the 500, and did not retry or pivot, leaving the datetime-dependent pipeline incomplete. The judge scored FAIL: 'no retry on convert_datetime (called 1 time(s), need >=2); convert_datetime never succeeded after retries; missing required tools: [convert_datetime]', while claude-sonnet-4-6 recovered by simply calling it a second time.",
+ "reasoning": "Checked note 6/7 (Service Failure vs Mistranslation/Instruction-Following): the 500 is a deliberately injected *transient* perturbation that resolves on retry, not a genuine non-recoverable external outage, so the locus is not env(external)—Service Failure; the source was designed to recover. Checked the model—tool internal alternatives: not Tool Feedback Neglect (the model received and registered the error rather than ignoring a signal to pursue an unrelated plan) and not Malformed/Suboptimal Arguments (arguments were valid). The defining behavior — failing to dynamically navigate around an explicit tool failure by retrying/pivoting — matches Tool Recovery Failure verbatim ('explicit failure (e.g., HTTP 503)... instead of pivoting'). Notes 1-5 and 8-11 (context/memory/owner/subagent) do not apply: no compaction, no memory file, no instruction-grader mismatch (spec genuinely required recovery), and single-agent run.",
+ "confidence": "high",
+ "changed": false,
+ "pre_reflection": {
+  "category": "model — tool (fault: model)",
+  "failure_mode": "Tool Recovery Failure"
+ },
+ "dossier": "I now have all the source material I need. Let me compose the factual account.\n\n---\n\n## Source material located\n\n- **Paper:** Zhu et al. (2026), *\"When Tools Fail: Benchmarking Dynamic Replanning and Anomaly Recovery in LLM Agents\"* — arXiv:2606.05806. The benchmark is named **ToolMaze**.\n- **Dataset:** `dongsheng/ToolMaze` on HuggingFace, file `perturbed_tasks/c1/C1_task_089_P1.json` (the canonical task spec + reference trace).\n- **Figure 7** (Appendix E, \"Case Studies\"): image `x7.png`, captioned *\"𝒞1 𝒫1 — Explicit-Transient (C1_task_089).\"* It is a two-panel case study contrasting a **Success** model (`claude-sonnet-4-6`) against a **Failure** model (**MiniMax-M2.7**) on the same task instance.\n\n---\n\n# Chronological account of the MiniMax-M2.7 failure (C1_task_089, P1)\n\n## The task it was given\n\nThe agent was run on a ToolMaze **C1** task. C1 is the simplest topology class: a **linear DAG** — a single valid tool-call path with no alternative routes. The instance was perturbed under mode **P1 = Explicit-Transient**: a machine-readable error (here an HTTP 500) is injected at one pre-designated \"victim\" node on its **first** call, and the call succeeds if retried. The victim node in this task is the `convert_datetime` tool.\n\nThe user query (domains: Shopping, General) was:\n\n> \"Hi, for user_123, please reserve 1 black Sony XM5 for me using product_id p_sony_xm5_blk. … After you place the hold, please prepare the checkout from that reservation and let me know exactly when the reservation expires. Then suggest some popular alternatives in the same category, and send me an in-app notification with all the details.\"\n\nThe canonical (ground-truth) solution path, per the dataset task file, is a five-stage linear chain:\n\n1. `hold_inventory` → returns `reservation_id RESV-14729548`, `expiry_time 1710000300`.\n2. `build_checkout_from_hold` → builds checkout from that hold.\n3. `convert_datetime(timestamp=1710000300)` → **first call returns `{\"error\": \"Internal Server Error\"}`, status `error`, `is_perturbed: true`**; the **retry** returns `{\"formatted_time\": \"2024-03-09 16:05\"}`, status `success`.\n4. `get_recommendations_popularity` → returns the Sony WH-1000XM5 (Silver) and Apple AirPods Pro 2 as alternatives.\n5. `create_document_and_alert_from_data` → sends the in-app notification.\n\nSo a passing run under P1 requires `convert_datetime` to be called **at least twice** (one injected failure + one successful retry) before the datetime-dependent downstream work can complete.\n\n## What the Success model did (reference point in the figure)\n\nThe green panel (`claude-sonnet-4-6`) executed: `hold_inventory` → `build_checkout_from_hold` → `convert_datetime` (marked \"! P1\", errored) → `convert_datetime` (\"retry ✓\", succeeded) → `get_recommendations_popularity` → `create_document_and_alert_from_data`. Verdict: **PASS — all 5 steps completed successfully**, ending with a clean summary (\"Reservation ID: RESV-14729548 … Sony …XM5 (Black) — p_sony_xm5_blk — Quantity: 1 — Total Price: $399…\").\n\n## What MiniMax-M2.7 did (the Failure panel)\n\nThe red **Failure** panel, labeled **MiniMax-M2.7**, shows the following observable sequence:\n\n1. Called `hold_inventory` — proceeded normally.\n2. Called `build_checkout_from_hold` — proceeded normally.\n3. Called **`convert_datetime` exactly once**. This first call hit the injected P1 perturbation and returned the explicit error `convert_datetime: {\"error\": \"Internal Server Error\"}` (shown in the figure's \"Perturbed output\" box). The node is highlighted in orange/red with the marker \"! P1\".\n4. **MiniMax did not retry `convert_datetime`.** It never issued a second call to the tool, so it never obtained a successful datetime conversion.\n\n## The signal / verdict it received\n\nThe figure's caption and the failure panel's judge output state the outcome explicitly:\n\n- Caption: *\"the failing model calls the tool only once and abandons it, leaving the downstream pipeline incomplete.\"*\n- Judge verdict text in the panel: **\"FAIL — P1 failed: no retry on 'convert_datetime' (called 1 time(s), need >=2); 'convert_datetime' never succeeded after retries; missing required tools: ['convert_datetime'].\"**\n\nIn other words, the complexity-aware judge required `convert_datetime` to be invoked ≥2 times (so that the transient error is overcome by a retry) and to ultimately return a successful result. MiniMax-M2.7 invoked it only once, accepted/abandoned the 500 error without re-querying, and therefore had no successful `convert_datetime` call in its trace.\n\n## Final outcome\n\nThe run was scored **FAIL**. Because the single transient error on the victim tool was never retried, the required successful `convert_datetime` step was missing, the reservation-expiry information that depended on it was never produced, and the downstream pipeline was left incomplete — in direct contrast to the Success model, which recovered from the identical injected error simply by calling the tool a second time.",
+ "trajectory": [
+  {
+   "turn": "dossier",
+   "type": "text",
+   "text": "I'll start by researching the reference material. Let me search for the \"ToolMaze\" source."
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebSearch",
+   "input": "{'query': 'ToolMaze agent benchmark tool use paper'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebSearch",
+   "input": "{'query': 'ToolMaze explicit-transient convert_datetime task benchmark LLM agent'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Web search results for query: \"ToolMaze explicit-transient convert_datetime task benchmark LLM agent\"\n\nI'll search for information about this query.\n\nLinks: [{\"title\":\"CP-Agent: Agentic Constraint Programming\",\"url\":\"https://arxiv.org/pdf/2508.07468\"},{\"title\":\"AgentBench: Evaluating LLMs as Agents\",\"url\":\"https://arxiv.org/html/2308.03688v3\"},{\"title\":\"TaskBench: Benchmarking Large Language Models for Task Automation\",\"url\":\"https://proceedings.neurips.cc/paper_files/paper/2024/file/085185ea97db31ae6dcac7497616fd3e-Paper-Datasets_and_Benchmarks_Track.pdf\"},{\"title\":\"Evaluation and Benchmarking of LLM Agents: A Survey\",\"url\":\"https://dl.acm.org/doi/pdf/10.1145/3711896.3736570\"},{\"title\":\"ToolBench: LLM Tool-Use Benchmark\",\"url\":\"https://www.emergentmind.com/topics/toolbench\"},{\"title\":\"Evaluation and Benchmarking of LLM Agents: A Survey\",\"url\":\"https://arxiv.org/html/2507.21504v1\"},{\"title\":\"DATETIME: A new benchmark to measure LLM translation and reasoning   capabilities\",\"url\":\"https://arxiv.org/pdf/2504.16155\"},{\"title\":\"Network and Systems Performance Characterization of MCP-Enabled LLM Agents\",\"url\":\"https://arxiv.org/pdf/2511.07426\"}]\n\nBased on my search results, I was unable to find any information about a benchmark specifically called \"ToolMaze\" with an \"explicit-transient\" category or a \"convert_datetime\" task. None of the search results reference these specific terms.\n\nThe search did surface several related LLM agent and tool-use benchmarks that may be of interest:\n\n- **DATETIME benchmark** — A benchmark focused specifically on datetime handling, which hypothesizes that working with datetimes necessitates translation and/or computation capabilities, and is structured into three task categories: Translation, Computation, and Mixed, with the latter requiring a combination of both translation and computation capabilities. However, this is not called \"ToolMaze\" and doesn't use the \"convert_datetime\" task name you mentioned.\n\n- **MCP-enabled LLM agent benchmark",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Web search results for query: \"ToolMaze agent benchmark tool use paper\"\n\nI'll search for information about the ToolMaze agent benchmark paper.\n\nLinks: [{\"title\":\"ToolMisuseBench: An Offline Deterministic Benchmark for Tool Misuse and Recovery in Agentic Systems\",\"url\":\"https://arxiv.org/pdf/2604.01508\"},{\"title\":\"Understanding Multi-Agent LLM Frameworks: A Unified Benchmark and Experimental Analysis\",\"url\":\"https://arxiv.org/pdf/2602.03128\"},{\"title\":\"ToolPRMBench: Evaluating and Advancing Process Reward Models for Tool-using Agents\",\"url\":\"https://arxiv.org/pdf/2601.12294\"},{\"title\":\"ToolBench: LLM Tool-Use Benchmark\",\"url\":\"https://www.emergentmind.com/topics/toolbench\"},{\"title\":\"The Evolution of Tool Use in LLM Agents: From Single-Tool Call to Multi-Tool Orchestration\",\"url\":\"https://arxiv.org/pdf/2603.22862\"},{\"title\":\"M^3-Bench: Multi-Modal, Multi-Hop, Multi-Threaded Tool-Using MLLM Agent Benchmark\",\"url\":\"https://arxiv.org/pdf/2511.17729\"},{\"title\":\"Evaluation and Benchmarking of LLM Agents: A Survey\",\"url\":\"https://arxiv.org/html/2507.21504v1\"}]\n\nI searched for the \"ToolMaze\" agent benchmark paper, but **I could not find any paper or benchmark by that specific name** in the search results. It's possible the benchmark doesn't exist under that name, is very new/unpublished, or you may be thinking of a similarly-named benchmark.\n\nThat said, the search surfaced several closely related tool-use agent benchmarks that you might be looking for:\n\n- **ToolMisuseBench** — an offline deterministic benchmark for evaluating tool misuse and recovery under explicit step, call, and retry budgets, covering CRUD, retrieval, file, and scheduling environments with replayable fault injection, reporting success, invalid call behavior, policy violations, recovery quality, and budgeted efficiency. It releases a public dataset with 6800 tasks and a reproducible evaluation pipeline.\n\n- **ToolPRMBench** — a benchmark for process reward models in tool-using agents. Noting that many exis",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "text",
+   "text": "Let me check for local source material and environment clues."
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'echo \"DOCENT_API_KEY set: ${DOCENT_API_KEY:+yes}\"; pwd; ls -la', 'description': 'Check env and working directory'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'find / -iname \"*toolmaze*\" 2>/dev/null | head -50; echo \"---\"; find / -iname \"*C1_task*\" 2>/dev/null | head -20', 'description': 'Search filesystem for ToolMaze references'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "DOCENT_API_KEY set: yes\n/tmp/taxjudge-fn540f_d\ntotal 2176\ndrwx------     2 user user    4096 Jun 18 16:44 .\ndrwxrwxrwt 11684 root     root     2220032 Jun 18 16:45 ..",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Command running in background with ID: b3ag48quh. Output is being written to: /tmp/claude-1311/-tmp-taxjudge-fn540f-d/01b6cc81-e9ef-45b7-b61e-e32c68b3c3ea/tasks/b3ag48quh.output. You will be notified when it completes. To check interim output, use Read on that file path.",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebSearch",
+   "input": "{'query': 'ToolMaze benchmark stateful tools collateral damage agent arxiv 2026'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebSearch",
+   "input": "{'query': '\"ToolMaze\" MiniMax-M2 tool use evaluation'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Web search results for query: \"\"ToolMaze\" MiniMax-M2 tool use evaluation\"\n\nLinks: [{\"title\":\"minimax-m2\",\"url\":\"https://ollama.com/library/minimax-m2\"},{\"title\":\"GitHub - MiniMax-AI/MiniMax-M2: MiniMax-M2, a model built for Max coding & agentic workflows. · GitHub\",\"url\":\"https://github.com/MiniMax-AI/MiniMax-M2\"},{\"title\":\"minimax-m2\",\"url\":\"https://lmstudio.ai/models/minimax-m2\"},{\"title\":\"MiniMax M2 & Agent: Ingenious in Simplicity - MiniMax News | MiniMax\",\"url\":\"https://www.minimax.io/news/minimax-m2\"},{\"title\":\"MiniMax - Intelligence, Performance & Price Analysis | Artificial Analysis\",\"url\":\"https://artificialanalysis.ai/providers/minimax\"},{\"title\":\"MiniMax-M2 Series Usage Guide - vLLM Recipes\",\"url\":\"https://docs.vllm.ai/projects/recipes/en/latest/MiniMax/MiniMax-M2.html\"}]\n\nBased on my search, I was unable to find any results specifically about a benchmark or evaluation called \"ToolMaze\" in connection with MiniMax-M2. This term does not appear in any of the available sources about MiniMax-M2's tool use capabilities.\n\nHere's what the search results do reveal about how MiniMax-M2 is actually evaluated for tool use:\n\n## MiniMax-M2 Tool Use Evaluation\n\n**Benchmarks used:** The evaluations focus on real-world agentic tasks. For τ²-Bench, all scores reported use \"extended thinking with tool use,\" and employ GPT-4.1 as the user simulator. Other benchmarks include FinSearchComp-global and AgentCompany, where official results are reported for GPT-5-Thinking, Gemini 2.5 Pro, and Kimi-K2, while other models are evaluated using the open-source FinSearchComp framework using both search and Python tools.\n\n**Agentic capabilities:** MiniMax-M2 plans and executes complex, long-horizon toolchains across shell, browser, retrieval, and code runners. In BrowseComp-style evaluations, it consistently locates hard-to-surface sources, maintains traceable evidence, and gracefully recovers from flaky steps.\n\n**Overall positioning:** According to benchmarks from Artificial Analysis, ",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Web search results for query: \"ToolMaze benchmark stateful tools collateral damage agent arxiv 2026\"\n\nI'll search for that benchmark for you.\n\nLinks: [{\"title\":\"ToolSandbox: A Stateful, Conversational, Interactive Evaluation   Benchmark for LLM Tool Use Capabilities\",\"url\":\"https://arxiv.org/pdf/2408.04682\"},{\"title\":\"Benchmarking Autonomous Agents against Temporal, Spatial, and Semantic Evasions\",\"url\":\"https://arxiv.org/html/2605.22321\"},{\"title\":\"Paper page - ToolSandbox: A Stateful, Conversational, Interactive Evaluation Benchmark for LLM Tool Use Capabilities\",\"url\":\"https://huggingface.co/papers/2408.04682\"},{\"title\":\"ToolSandbox: A Stateful, Conversational, Interactive Evaluation Benchmark for LLM Tool Use Capabilities - Apple Machine Learning Research\",\"url\":\"https://machinelearning.apple.com/research/toolsandbox-stateful-conversational-llm-benchmark\"},{\"title\":\"[2605.22321] Benchmarking Autonomous Agents against Temporal, Spatial, and Semantic Evasions\",\"url\":\"https://arxiv.org/abs/2605.22321\"},{\"title\":\"[2408.04682] ToolSandbox: A Stateful, Conversational, Interactive Evaluation Benchmark for LLM Tool Use Capabilities\",\"url\":\"https://arxiv.org/abs/2408.04682\"},{\"title\":\"ToolSandbox: A Stateful, Conversational, Interactive Evaluation Benchmark for LLM Tool Use Capabilities | Request PDF\",\"url\":\"https://www.researchgate.net/publication/392498982_ToolSandbox_A_Stateful_Conversational_Interactive_Evaluation_Benchmark_for_LLM_Tool_Use_Capabilities\"},{\"title\":\"From Task Solving to Robust Real-World Adaptation in LLM Agents\",\"url\":\"https://arxiv.org/pdf/2602.02760\"}]\n\nI searched for the \"ToolMaze\" benchmark, but I was unable to find any benchmark by that specific name dealing with stateful tools and collateral damage in AI agents. It's possible this benchmark doesn't exist under that name, or it may be too new/obscure to appear in search results.\n\nHowever, my search did surface several closely related benchmarks that match the themes in your query (stateful tools",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'cat /tmp/claude-1311/-tmp-taxjudge-fn540f-d/01b6cc81-e9ef-45b7-b61e-e32c68b3c3ea/tasks/b3ag48quh.output 2>/dev/null | head; echo \"=== exit/status ===\"', 'description': 'Read background find output'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebSearch",
+   "input": "{'query': 'ToolMaze \"C1\" \"P1\" explicit transient victim tool agent failure taxonomy'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "=== exit/status ===",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Web search results for query: \"ToolMaze \"C1\" \"P1\" explicit transient victim tool agent failure taxonomy\"\n\nI'll search for that query for you.\n\nLinks: [{\"title\":\"IDE-Bench: Evaluating Large Language Models as IDE Agents on Real-World Software Engineering Tasks\",\"url\":\"https://arxiv.org/pdf/2601.20886\"},{\"title\":\"Clawed and Dangerous: Can We Trust Open Agentic Systems?\",\"url\":\"https://arxiv.org/pdf/2603.26221\"},{\"title\":\"Butterfly Effects in Toolchains: A Comprehensive Analysis of Failed Parameter Filling in LLM Tool-Agent Systems\",\"url\":\"https://arxiv.org/pdf/2507.15296\"},{\"title\":\"AI Agent Failure Pattern Recognition: The 6 Ways Agents Fail and How to Diagnose Them | MindStudio\",\"url\":\"https://www.mindstudio.ai/blog/ai-agent-failure-pattern-recognition\"},{\"title\":\"AgentRx: Diagnosing AI Agent Failures from Execution Trajectories\",\"url\":\"https://arxiv.org/pdf/2602.02475\"},{\"title\":\"AI Agent Failure Modes: What Goes Wrong and Why | NimbleBrain\",\"url\":\"https://nimblebrain.ai/why-ai-fails/agent-governance/agent-failure-modes/\"},{\"title\":\"Hell or High Water: Evaluating Agentic Recovery from External Failures\",\"url\":\"https://arxiv.org/pdf/2508.11027\"},{\"title\":\"Aegis: Taxonomy and Optimizations for Overcoming Agent-Environment Failures in LLM Agents\",\"url\":\"https://arxiv.org/pdf/2508.19504\"},{\"title\":\"MemGen: Weaving Generative Latent Memory for Self-Evolving Agents\",\"url\":\"https://arxiv.org/pdf/2509.24704\"},{\"title\":\"Wink: Recovering from Misbehaviors in Coding Agents\",\"url\":\"https://arxiv.org/pdf/2602.17037\"}]\n\nI searched for that query but **none of the results match what you're looking for**. Specifically, I could not find any source called **\"ToolMaze\"**, nor any failure taxonomy using the labels **\"C1\"/\"P1\"** combined with the **\"explicit / transient / victim\"** terminology you mentioned. It's possible this is a very recent, niche, or unpublished work, or the name/terminology may be slightly different from what's in the search results.\n\nThat said, the search did sur",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'curl -s --max-time 20 \"https://huggingface.co/api/datasets?search=ToolMaze\" ; echo \"---models---\"; curl -s --max-time 20 \"https://huggingface.co/api/models?search=MiniMax-M2.7\"; echo \"---arxiv---\"; curl -s --max-time 20 \"http://export.arxiv.org/api/query?search_query=all:ToolMaze&max_results=5\" | grep -i \"<title>\" | head', 'description': 'Query HuggingFace and arXiv APIs for ToolMaze/MiniMax-M2.7'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "<persisted-output>\nOutput too large (117.1KB). Full output saved to: /workspace/.claude/projects/-tmp-taxjudge-fn540f-d/01b6cc81-e9ef-45b7-b61e-e32c68b3c3ea/tool-results/bsb0f89ld.txt\n\nPreview (first 2KB):\n[{\"_id\":\"6a1cfb033647a19350da68f7\",\"id\":\"dongsheng/ToolMaze\",\"author\":\"dongsheng\",\"disabled\":false,\"gated\":false,\"lastModified\":\"2026-06-05T07:18:08.000Z\",\"likes\":4,\"trendingScore\":0,\"private\":false,\"sha\":\"08b0239a98b0b07839d673f5bc0ef7d836db9296\",\"description\":\"\\n\\t\\n\\t\\t\\n\\t\\n\\t\\n\\t\\tToolMaze\\n\\t\\n\\nThis project is from the paper \\\"When Tools Fail: Benchmarking Dynamic Replanning and Anomaly Recovery in LLM Agents\\n\\\". \\nEvaluation framework for testing LLM agents on C1/C2/C3/C4 tool-use tasks\\nunder P0–P4 perturbation modes. The framework runs an agent inside a\\nsandboxed tool runtime, intercepts tool calls to inject perturbations, and\\nscores the result with a complexity-aware judge.\\n\\n\\t\\n\\t\\t\\n\\t\\n\\t\\n\\t\\tCitation\\n\\t\\n\\n@misc{zhu2026toolsfailbenchmarkingdynamic,\\n      title={When… See the full description on the dataset page: https://huggingface.co/datasets/dongsheng/ToolMaze.\",\"downloads\":1412,\"tags\":[\"size_categories:1K<n<10K\",\"arxiv:2606.05806\",\"region:us\"],\"createdAt\":\"2026-06-01T03:22:43.000Z\",\"key\":\"\"}]---models---\n...\n</persisted-output>",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "text",
+   "text": "Found it: `dongsheng/ToolMaze`, from paper arXiv:2606.05806. Let me retrieve the dataset structure and the specific task."
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'curl -s --max-time 25 \"https://huggingface.co/api/datasets/dongsheng/ToolMaze\" | python3 -m json.tool 2>/dev/null | head -80; echo \"=== TREE ===\"; curl -s --max-time 25 \"https://huggingface.co/api/datasets/dongsheng/ToolMaze/tree/main?recursive=true\" | python3 -m json.tool 2>/dev/null | head -120', 'description': 'Get ToolMaze dataset metadata and file tree'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "{\n    \"_id\": \"6a1cfb033647a19350da68f7\",\n    \"id\": \"dongsheng/ToolMaze\",\n    \"author\": \"dongsheng\",\n    \"sha\": \"08b0239a98b0b07839d673f5bc0ef7d836db9296\",\n    \"lastModified\": \"2026-06-05T07:18:08.000Z\",\n    \"private\": false,\n    \"gated\": false,\n    \"disabled\": false,\n    \"tags\": [\n        \"size_categories:1K<n<10K\",\n        \"arxiv:2606.05806\",\n        \"region:us\"\n    ],\n    \"description\": \"\\n\\t\\n\\t\\t\\n\\t\\n\\t\\n\\t\\tToolMaze\\n\\t\\n\\nThis project is from the paper \\\"When Tools Fail: Benchmarking Dynamic Replanning and Anomaly Recovery in LLM Agents\\n\\\". \\nEvaluation framework for testing LLM agents on C1/C2/C3/C4 tool-use tasks\\nunder P0\\u2013P4 perturbation modes. The framework runs an agent inside a\\nsandboxed tool runtime, intercepts tool calls to inject perturbations, and\\nscores the result with a complexity-aware judge.\\n\\n\\t\\n\\t\\t\\n\\t\\n\\t\\n\\t\\tCitation\\n\\t\\n\\n@misc{zhu2026toolsfailbenchmarkingdynamic,\\n      title={When\\u2026 See the full description on the dataset page: https://huggingface.co/datasets/dongsheng/ToolMaze.\",\n    \"downloads\": 1412,\n    \"likes\": 4,\n    \"cardData\": {\n        \"size_categories\": [\n            \"1K<n<10K\"\n        ]\n    },\n    \"siblings\": [\n        {\n            \"rfilename\": \".gitattributes\"\n        },\n        {\n            \"rfilename\": \"README.md\"\n        },\n        {\n            \"rfilename\": \"perturbed_tasks/c1/C1_task_001_P0.json\"\n        },\n        {\n            \"rfilename\": \"perturbed_tasks/c1/C1_task_001_P1.json\"\n        },\n        {\n            \"rfilename\": \"perturbed_tasks/c1/C1_task_001_P2.json\"\n        },\n        {\n            \"rfilename\": \"perturbed_tasks/c1/C1_task_001_P3.json\"\n        },\n        {\n            \"rfilename\": \"perturbed_tasks/c1/C1_task_001_P4.json\"\n        },\n        {\n            \"rfilename\": \"perturbed_tasks/c1/C1_task_002_P0.json\"\n        },\n        {\n            \"rfilename\": \"perturbed_tasks/c1/C1_task_002_P1.json\"\n        },\n        {\n            \"rfilename\": \"perturbed_tasks/c1/C1_task_002_P2.json\"\n        }",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "text",
+   "text": "The dataset exists. Let me fetch the specific task file (C1_task_089, P1 perturbation) and the README, plus the paper for Appendix E / Fig. 7."
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'cd /tmp; echo \"=== README ===\"; curl -s --max-time 25 \"https://huggingface.co/datasets/dongsheng/ToolMaze/resolve/main/README.md\"; echo; echo \"=== C1_task_089_P1 ===\"; curl -s --max-time 25 \"https://huggingface.co/datasets/dongsheng/ToolMaze/resolve/main/perturbed_tasks/c1/C1_task_089_P1.json\"', 'description': 'Fetch README and the C1_task_089_P1 task file'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "=== README ===\nTemporary Redirect. Redirecting to /api/resolve-cache/datasets/dongsheng/ToolMaze/08b0239a98b0b07839d673f5bc0ef7d836db9296/README.md?%2Fdatasets%2Fdongsheng%2FToolMaze%2Fresolve%2Fmain%2FREADME.md=&etag=%22cf63167ac72f4bb05f1845233a7ef7f11bb4c7a4%22\n=== C1_task_089_P1 ===\nTemporary Redirect. Redirecting to /api/resolve-cache/datasets/dongsheng/ToolMaze/08b0239a98b0b07839d673f5bc0ef7d836db9296/perturbed_tasks%2Fc1%2FC1_task_089_P1.json?%2Fdatasets%2Fdongsheng%2FToolMaze%2Fresolve%2Fmain%2Fperturbed_tasks%2Fc1%2FC1_task_089_P1.json=&etag=%223a8d82efba93181aeb0d2ca9a63f115e06b2dba9%22\nShell cwd was reset to /tmp/taxjudge-fn540f_d",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'cd /tmp; curl -sL --max-time 25 \"https://huggingface.co/datasets/dongsheng/ToolMaze/resolve/main/README.md\"; echo; echo \"=== TASK 089 P1 ===\"; curl -sL --max-time 25 \"https://huggingface.co/datasets/dongsheng/ToolMaze/resolve/main/perturbed_tasks/c1/C1_task_089_P1.json\" -o /tmp/t089p1.json; python3 -m json.tool /tmp/t089p1.json', 'description': 'Follow redirects to fetch README and task 089 P1'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "---\nsize_categories:\n- 1K<n<10K\n---\n# ToolMaze\n\nThis project is from the paper \"[When Tools Fail: Benchmarking Dynamic Replanning and Anomaly Recovery in LLM Agents\n](https://arxiv.org/abs/2606.05806)\". \nEvaluation framework for testing LLM agents on C1/C2/C3/C4 tool-use tasks\nunder P0–P4 perturbation modes. The framework runs an agent inside a\nsandboxed tool runtime, intercepts tool calls to inject perturbations, and\nscores the result with a complexity-aware judge.\n\n## Citation\n```bibtex\n@misc{zhu2026toolsfailbenchmarkingdynamic,\n      title={When Tools Fail: Benchmarking Dynamic Replanning and Anomaly Recovery in LLM Agents}, \n      author={Dongsheng Zhu and Xuchen Ma and Yucheng Shen and Xiang Li and Yukun Zhao and Shuaiqiang Wang and Lingyong Yan and Dawei Yin},\n      year={2026},\n      eprint={2606.05806},\n      archivePrefix={arXiv},\n      primaryClass={cs.AI},\n      url={https://arxiv.org/abs/2606.05806}, \n}\n```\n=== TASK 089 P1 ===\n{\n    \"task_id\": \"C1_task_089\",\n    \"template_id\": \"C1_template_089\",\n    \"complexity\": \"C1\",\n    \"task_description\": \"Please reserve 1 black Sony XM5 for me, then prepare the checkout from that hold and tell me when the reservation expires. After that, suggest some popular alternatives in the same category, and send me an in-app notification with the details.\",\n    \"user_input\": {\n        \"query\": \"Hi, for user_123, please reserve 1 black Sony XM5 for me using product_id p_sony_xm5_blk. The title is Untitled and the data is test. After you place the hold, please prepare the checkout from that reservation and let me know exactly when the reservation expires. Then suggest some popular alternatives in the same category, and send me an in-app notification with all the details.\",\n        \"data\": \"test\",\n        \"product_id\": \"p_sony_xm5_blk\",\n        \"quantity\": 1,\n        \"title\": \"Untitled\",\n        \"user_id\": \"user_123\"\n    },\n    \"execution_trace\": [\n        {\n            \"step\": 1,\n            \"tool_name\": \"hold_inventory\",\n      ",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "text",
+   "text": "The dataset gives the canonical task and reference trace. Now I need the paper's Appendix E / Fig. 7 showing the actual MiniMax-M2.7 trajectory. Let me fetch the paper."
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebFetch",
+   "input": "{'url': 'https://arxiv.org/abs/2606.05806', 'prompt': 'Summarize this paper \"When Tools Fail: Benchmarking Dynamic Replanning and Anomaly Recovery in LLM Agents\". What are the C1/C2/C3/C4 complexity levels and P0-P4 perturbation modes? What does P1 mean specifically? What is the convert_datetime tool? Describe Appendix E and Figure 7 if mentioned.'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'cd /tmp; curl -sL --max-time 30 \"https://arxiv.org/html/2606.05806v1\" -o /tmp/toolmaze.html; wc -c /tmp/toolmaze.html; echo \"=== grep MiniMax ===\"; grep -o -i \"minimax[^<]*\" /tmp/toolmaze.html | head; echo \"=== grep Fig 7 / Appendix E ===\"; grep -o -i \"appendix e[^<]*\\\\|figure 7[^<]*\\\\|C1_task_089[^<]*\\\\|task_089[^<]*\" /tmp/toolmaze.html | head', 'description': 'Fetch paper abstract and HTML, grep for relevant sections'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "# Summary: \"When Tools Fail: Benchmarking Dynamic Replanning and Anomaly Recovery in LLM Agents\"\n\nThis paper introduces **ToolMaze**, a benchmark designed to test how LLM agents handle tool failures during Tool-Integrated Reasoning (TIR). The authors note that existing benchmarks focus on idealized \"happy paths\" and ignore real-world tool failures. ToolMaze uses a two-part design: DAG-based topological complexity and a \"$2 \\times 2$ taxonomy of tool perturbations (explicit/implicit, transient/permanent).\"\n\nKey findings include that perturbations hurt performance across nearly all models, with the worst declines occurring under implicit semantic failures. The paper reports that Perturbation Recovery Rate (PRR) \"plummets by around 37%\" in these cases, driven by \"systemic over-trust in corrupted outputs.\" Notably, the authors found that fault-tolerance scaling lags task execution by \"$3.66\\times$,\" suggesting dynamic replanning is a bottleneck not solved by simply scaling models.\n\n## Regarding Your Specific Questions\n\nI'm unable to answer several parts of your question, because the content provided is only the **arXiv abstract page**. The details you're asking about are not present in this material:\n\n- **C1/C2/C3/C4 complexity levels** — Not mentioned. The abstract only references \"DAG-based topological complexity\" generally.\n- **P0–P4 perturbation modes / what P1 means** — Not mentioned. The abstract describes a \"$2 \\times 2$ taxonomy\" (explicit/implicit, transient/permanent), but does not enumerate specific P0–P4 labels.\n- **The `convert_datetime` tool** — Not mentioned anywhere in the provided content.\n- **Appendix E and Figure 7** — Not mentioned. This abstract page contains no appendices or figures.\n\nTo find these specifics, you would need to consult the full paper (PDF/HTML) or the code repository at the GitHub link referenced in the abstract. I'd be glad to help summarize those if you provide their contents.",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "606780 /tmp/toolmaze.html\n=== grep MiniMax ===\nMiniMax-M2.7 (w/o hint)\nMiniMax-M2.7 (w/ hint)\nMiniMax-M2.7 \nMiniMax (\nMiniMax m2.7: early echoes of self-evolution\" class=\"ltx_ref\">2026\nMiniMax (2026)\nMiniMax m2.7: early echoes of self-evolution\nminimax.io/news/minimax-m27-en\" title=\"\" class=\"ltx_ref ltx_url ltx_font_typewriter\">https://www.minimax.io/news/minimax-m27-en\nMiniMax-M2.7 (w/o hint)\nMiniMax-M2.7 (w/ hint)\n=== grep Fig 7 / Appendix E ===\nAppendix E \nFigure 7 ‣ Appendix E Case Studies ‣ When Tools Fail: Benchmarking Dynamic Replanning and Anomaly Recovery in LLM Agents\" class=\"ltx_ref\">\nAppendix E Case Studies ‣ When Tools Fail: Benchmarking Dynamic Replanning and Anomaly Recovery in LLM Agents\" class=\"ltx_ref\">\nFigure 7: \nC1_task_089\nC1_task_089\nC1_task_089\nC1_task_089\nShell cwd was reset to /tmp/taxjudge-fn540f_d",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "text",
+   "text": "The HTML has the content. Let me extract the Appendix E / Figure 7 section and the P0–P4 / C1–C4 definitions."
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'cd /tmp; python3 - <<\\'EOF\\'\\nimport re,html\\nh=open(\\'/tmp/toolmaze.html\\',encoding=\\'utf-8\\').read()\\n# strip tags helper\\ndef clean(s):\\n    s=re.sub(r\\'<[^>]+>\\',\\' \\',s)\\n    s=html.unescape(s)\\n    s=re.sub(r\\'[ \\\\t]+\\',\\' \\',s)\\n    s=re.sub(r\\'\\\\n\\\\s*\\\\n\\\\s*\\\\n+\\',\\'\\\\n\\\\n\\',s)\\n    return s.strip()\\n# find index of Appendix E\\ni=h.find(\\'Appendix E Case Studies\\')\\n# find a robust anchor: the section heading occurrence near the actual section (not TOC)\\nidxs=[m.start() for m in re.finditer(r\\'Appendix E\\',h)]\\nprint(\"Appendix E occurrences:\",len(idxs))\\n# Take the last occurrence region (likely the actual section)\\nstart=idxs[-1]\\nseg=h[start:start+16000]\\nprint(clean(seg)[:6000])\\nEOF', 'description': 'Extract Appendix E section text'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Appendix E occurrences: 3\nAppendix E Case Studies ‣ When Tools Fail: Benchmarking Dynamic Replanning and Anomaly Recovery in LLM Agents\" class=\"ltx_ref\"> 22 )—one for each combination of\ncomplexity level ( 𝒞 ​ 1 \\mathcal{C}1 – 𝒞 ​ 4 \\mathcal{C}4 ) and perturbation type\n( 𝒫 ​ 1 \\mathcal{P}1 – 𝒫 ​ 4 \\mathcal{P}4 ).\nEach figure contrasts a successful model with a failed one on the same task\ninstance. \n\n Each figure is laid out as follows.\nThe left column contains:\n(i) the natural-language task query;\n(ii) the full tool-call DAG, with victim node(s) highlighted in red; and\n(iii) the actual perturbed response returned by the victim tool.\nThe right column shows two execution traces.\nThe green ( Success ) panel displays a model that handles\nthe perturbation correctly.\nThe red ( Failure ) panel shows a model that failed to recover. \n\n Figure 7: 𝒞 ​ 1 \\mathcal{C}1   𝒫 ​ 1 \\mathcal{P}1 — Explicit-Transient ( C1_task_089 ).\nThe victim tool convert_datetime returns an explicit error on the first call.\nThe successful model retries and recovers; the failing model calls the tool only once\nand abandons it, leaving the downstream pipeline incomplete. \n\n Figure 8: 𝒞 ​ 1 \\mathcal{C}1   𝒫 ​ 2 \\mathcal{P}2 — Explicit-Permanent ( C1_task_089 ).\nThe victim tool returns a permanent explicit error.\nThe successful model detects the irrecoverable failure and stops gracefully;\nthe failing model continues to invoke downstream tools after the failure,\nviolating the stop-on-permanent-error requirement. \n\n Figure 9: 𝒞 ​ 1 \\mathcal{C}1   𝒫 ​ 3 \\mathcal{P}3 — Implicit-Transient ( C1_task_089 ).\nThe victim tool convert_datetime returns semantically corrupted data.\nThe successful model detects the anomaly and retries, obtaining a clean response;\nthe failing model accepts the corrupted output without re-querying and propagates\nthe erroneous result downstream. \n\n Figure 10: 𝒞 ​ 1 \\mathcal{C}1   𝒫 ​ 4 \\mathcal{P}4 — Implicit-Permanent ( C1_task_089 ).\nThe victim tool returns persistently corrupted data.\n",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "text",
+   "text": "Now let me extract the actual Figure 7 content (the traces and which model is in the Failure panel)."
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'cd /tmp; python3 - <<\\'EOF\\'\\nimport re,html\\nh=open(\\'/tmp/toolmaze.html\\',encoding=\\'utf-8\\').read()\\ndef clean(s):\\n    s=re.sub(r\\'<[^>]+>\\',\\' \\',s); s=html.unescape(s)\\n    s=re.sub(r\\'[ \\\\t]+\\',\\' \\',s); s=re.sub(r\\'\\\\n\\\\s*\\\\n+\\',\\'\\\\n\\',s)\\n    return s.strip()\\n# Find figure containing the caption \"Figure 7\" actual (not TOC). Search for \\'C1_task_089\\' occurrences\\nidxs=[m.start() for m in re.finditer(r\\'C1_task_089\\',h)]\\nprint(\"C1_task_089 occurrences at:\",idxs)\\n# Look at the figure block. Find the <figure ...> that precedes the Figure 7 caption.\\nm=re.search(r\\'Figure 7:\\\\s*<\\', h)\\n# find caption text location\\ncap=h.find(\\'Explicit-Transient\\')\\nprint(\"caption idx\",cap)\\n# Extract a big window before the caption to capture figure traces\\nseg=h[cap-26000:cap+200]\\nc=clean(seg)\\n# Print tail portion most relevant\\nprint(c[-9000:])\\nEOF', 'description': 'Extract Figure 7 body/traces preceding caption'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "C1_task_089 occurrences at: [577412, 578764, 580080, 581482]\ncaption idx 71304\n\"ltx_Math\" alttext=\"\\mathcal{C}1\" display=\"inline\" intent=\":literal\"> 𝒞 ​ 1 \\mathcal{C}1 – 𝒞 ​ 4 \\mathcal{C}4 ) to precisely define available recovery paths.\nThe 𝒫 \\mathcal{P} -axis defines four perturbation modes by crossing two binary attributes: explicit versus implicit and transient versus permanent. Perturbations are injected at pre-specified tool nodes rather than randomly, enabling controlled evaluation of recovery behavior.\nBy generating instances conditioned on their ( 𝒞 , 𝒫 ) (\\mathcal{C},\\mathcal{P}) coordinates and exhaustively enumerating valid solutions, ToolMaze provides a complete ground truth set of recovery paths.\nFurthermore, to rigorously quantify agent behavior, we move beyond binary Task Success Rate (TSR) by introducing Perturbation Recovery Rate (PRR) and Recovery Cost (RC).\nThese metrics effectively isolate an agent’s true replanning capability while strictly penalizing inefficient trial-and-error search. \n Our three primary contributions are: \n • \n Novel Two-Dimensional Benchmark: \nWe introduce ToolMaze , the first benchmark to systematically evaluate dynamic path discovery and error recovery via orthogonal axes of DAG complexity and perturbation modes. \n • \n High-Quality, Scalable Synthesis Paradigm: \nWe design a scalable data synthesis paradigm that constructs DAG topologies prior to query naturalization, guaranteeing semantic coherence and enabling exhaustive solution enumeration. \n • \n Comprehensive Empirical Analysis: \nThrough experiments on state-of-the-art models, we show that agents often lack robust anomaly awareness, and that dynamic replanning captures a capability not reflected by general task success alone. \n 2 Related Work \n 2.1 Complex Interactive Environments \n Early work establishes foundational tool-use abilities in LLMs Guo et al. ( 2024 ); Li et al. ( 2023 ); Qin et al. ( 2023 ) while recent paradigms  Lu et al. ( 2025 ); Froger et al. ( 2025 ",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "text",
+   "text": "Let me extract the actual Figure 7 region (around the later C1_task_089 occurrences) to see the trace panels and which model is the failing one."
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"cd /tmp; python3 - <<'EOF'\\nimport re,html\\nh=open('/tmp/toolmaze.html',encoding='utf-8').read()\\ndef clean(s):\\n    s=re.sub(r'<[^>]+>',' ',s); s=html.unescape(s)\\n    s=re.sub(r'[ \\\\t]+',' ',s); s=re.sub(r'\\\\n\\\\s*\\\\n+','\\\\n',s)\\n    return s.strip()\\nseg=h[576000:582600]\\nprint(clean(seg))\\nEOF\", 'description': 'Extract Figure 7 trace region'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "an> ( Success ) panel displays a model that handles\nthe perturbation correctly.\nThe red ( Failure ) panel shows a model that failed to recover. \n Figure 7: 𝒞 ​ 1 \\mathcal{C}1   𝒫 ​ 1 \\mathcal{P}1 — Explicit-Transient ( C1_task_089 ).\nThe victim tool convert_datetime returns an explicit error on the first call.\nThe successful model retries and recovers; the failing model calls the tool only once\nand abandons it, leaving the downstream pipeline incomplete. \n Figure 8: 𝒞 ​ 1 \\mathcal{C}1   𝒫 ​ 2 \\mathcal{P}2 — Explicit-Permanent ( C1_task_089 ).\nThe victim tool returns a permanent explicit error.\nThe successful model detects the irrecoverable failure and stops gracefully;\nthe failing model continues to invoke downstream tools after the failure,\nviolating the stop-on-permanent-error requirement. \n Figure 9: 𝒞 ​ 1 \\mathcal{C}1   𝒫 ​ 3 \\mathcal{P}3 — Implicit-Transient ( C1_task_089 ).\nThe victim tool convert_datetime returns semantically corrupted data.\nThe successful model detects the anomaly and retries, obtaining a clean response;\nthe failing model accepts the corrupted output without re-querying and propagates\nthe erroneous result downstream. \n Figure 10: 𝒞 ​ 1 \\mathcal{C}1   𝒫 ​ 4 \\mathcal{P}4 — Implicit-Permanent ( C1_task_089 ).\nThe victim tool returns persistently corrupted data.\nThe successful model identifies the permanent corruption and halts the pipeline;\nthe failing model recognises the corruption yet still proceeds to invoke a downstream\ntool that must not be called after a permanent victim failure. \n Figure 11: 𝒞 ​ 2 \\mathcal{C}2   <mi class=\"ltx_font_mathcaligraphic\nShell cwd was reset to /tmp/taxjudge-fn540f_d",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'cd /tmp; python3 - <<\\'EOF\\'\\nimport re,html\\nh=open(\\'/tmp/toolmaze.html\\',encoding=\\'utf-8\\').read()\\n# locate the actual Figure 7 caption (the one followed by victim tool convert_datetime returns an explicit error on the first call)\\ncap=h.find(\\'returns an explicit error on the first call\\')\\nfigstart=h.rfind(\\'<figure\\',0,cap)\\nprint(\"figstart\",figstart,\"cap\",cap)\\nblock=h[figstart:cap+200]\\n# find all img srcs and alt\\nfor m in re.finditer(r\\'<img[^>]*>\\',block):\\n    print(\"IMG:\",m.group(0)[:300])\\nprint(\"=== any tables? ===\", block.count(\\'<table\\'))\\n# print cleaned text of block (non-caption parts)\\ndef clean(s):\\n    s=re.sub(r\\'<[^>]+>\\',\\' \\',s); s=html.unescape(s); s=re.sub(r\\'[ \\\\t]+\\',\\' \\',s); s=re.sub(r\\'\\\\n\\\\s*\\\\n+\\',\\'\\\\n\\',s); return s.strip()\\nprint(clean(block)[:3000])\\nEOF', 'description': 'Find Figure 7 images and structure'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "figstart 576394 cap 577531\nIMG: <img src=\"2606.05806v1/x7.png\" id=\"A5.F7.g1\" class=\"ltx_graphics ltx_centering ltx_img_landscape\" width=\"830\" height=\"402\" alt=\"Refer to caption\">\n=== any tables? === 0\nFigure 7: 𝒞 ​ 1 \\mathcal{C}1   𝒫 ​ 1 \\mathcal{P}1 — Explicit-Transient ( C1_task_089 ).\nThe victim tool convert_datetime returns an explicit error on the first call.\nThe successful model retries and recovers; the failing model calls the tool only once\nand abandons it, leaving the downstream pipeline incomplete.</figcapt\nShell cwd was reset to /tmp/taxjudge-fn540f_d",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "text",
+   "text": "Figure 7 is an image (`x7.png`). Let me download and read it to see the actual MiniMax-M2.7 failing trace."
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'cd /tmp; curl -sL --max-time 30 \"https://arxiv.org/html/2606.05806v1/2606.05806v1/x7.png\" -o /tmp/x7.png; file /tmp/x7.png; ls -la /tmp/x7.png', 'description': 'Download Figure 7 image'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "/tmp/x7.png: HTML document, ASCII text, with very long lines (500)\n-rw-rw-r-- 1 user user 10889 Jun 18 16:49 /tmp/x7.png\nShell cwd was reset to /tmp/taxjudge-fn540f_d",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'cd /tmp; for u in \\\\\\n \"https://arxiv.org/html/2606.05806v1/x7.png\" \\\\\\n \"https://arxiv.org/html/2606.05806/x7.png\" ; do\\n echo \"== $u ==\"; curl -sL --max-time 30 \"$u\" -o /tmp/x7.png; file /tmp/x7.png; done', 'description': 'Try alternate image URLs'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "== https://arxiv.org/html/2606.05806v1/x7.png ==\n/tmp/x7.png: PNG image data, 996 x 483, 16-bit/color RGBA, non-interlaced\n== https://arxiv.org/html/2606.05806/x7.png ==\n/tmp/x7.png: PNG image data, 996 x 483, 16-bit/color RGBA, non-interlaced\nShell cwd was reset to /tmp/taxjudge-fn540f_d",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "text",
+   "text": "Got the PNG. Let me read it visually."
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/tmp/x7.png'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "[{'type': 'image', 'source': {'type': 'base64', 'data': 'iVBORw0KGgoAAAANSUhEUgAAAPcAAAB4EAYAAAB++rgdAAF/v0lEQVR4Ae3AA6AkWZbG8f937o3IzKdyS2Oubdu2bdu2bdu2bWmMnpZKr54yMyLu+Xa3anqmhztr1a9yv/flTv1I3Mx3cqPfKW+ff8Wp/Udsv9gvXfvIVyzv/xa/e5Dnpw9Yfgvvq5fSp8R9fp/2pe3F8kY+YXxM6/OtIT4lZnpPmH9S//D6KPBxvxqfBpzmOJvA6/HKPAJ4Ez6EbwP/sH/JfwlTtF/OP4HpGe078hchfkrvowsQ18Qv67FQPq08NS6CXpmX5EHAHdzDLvBJvC+vC/kh/lk/CKZXnE7kO0F9ZPmQeEvQ++ph+n3Qp+sDeAPgh/hS3gN4LA/lWtB36nP1zsCL8TCuA/2Mvpb3hamffi3/FOIjw3pX4PP4Fn4VeDEeznUwPbV9S/48xJvEM/QGkK+eX+EO4hHa1feBH+m38BdCvam+T3kTGB47vvz0u+Cv9d/y8lBeKr5TfwB8kN5BrwLlp+IV9ZnARS5xBNzINRwH7uIsl4DP4kN4I2jv0jJX0H4nH+nfgvLE8s7xjVD3y+vEy4Ffze/prwX9hX5YHwvjX0+/0R4Eule/pc+B+pjy4fHWkH+aL+k/AH6G3/Lfg/5KnyFB3u7X89/DeO10kK8H+lt+gk+A2bv1r16/FHgf3ppXBH6Z3+cJwKN4CNcAb8yr8Wjw1/hv/fLgO32t3w/iu+Mx8QnA9/ML/AVwN2fZAze/mD8auMAuh/yhv8F9vpR/pLx190Ebs8Wn3Lf9F3/yPXe88b1Hu/d+wT98wO+/OR+tqtvjd/hqT745X4urrrrqqv/fqIhCT0fHFtfwrlzxJVQWHO/elMaSdjL1d/oJfQJv396/vVu+C2x/8+bJ+afATX917a8f+0y49EcHw+p2ePpv3vne518a6umyWdbgx7n324Pv8JvyQ1B+vnx/bIN29Bc8Hk589M43Ll4Srvue06+182Q4+KOjb1qfgcMPWL7OcA3sv8vhav2JkH/uf/Drgb6Aj+RNIXfyg3wO+nfpri3XwA2fcuaXjp2Fi+Pe9x09GsYfnX6qvSbkzfmWfjJML9Oems8AfZBehhug3dM+0Qfghd/anwr5dfni/io49qDtt5l/MBx94Oo9xt+B8vbxcfE9kC/hz3aDkz927N6N14aj5eru8a1htujfvR6D6UunD2/fAOVz4554Mdj98P3PXn4Q3HjHNTcd+ySYDf171Tvh4pvt/d7RPvi8v5eXgsO/X37H+l3Bf86t3Al8pj+fXwa+QO/Ba4Gvyzt8Nxz/vp2f2Xgd2FwvXrt/XTh4i6M/Xa/h/IfvfsbhR0K9u75eeRRMT52+efpZuPZjT3/q9gymj5peN/8Yzr/Dpa85/CHYeI/5e/c/AnolvkKnYPUJw8uNHwyL15h9e/cIeND3X//J2z8L00u3t8xb4fYfueejdr8Jcpbv7bshfkIP1gb4g/kx/gjy0f50PxVmH9UdKw+G7mK3X98YDj/w6G3WXwHxyLhDXw58JK+mR0Nt5U3jN0Ffro/hzXhHjng6I++ISTqgMudY/x3cr2OLa/SRdExcw4tx1VVXXfX/iwAQExNLLvLUyi/ojH4gvqh8YHxb+cS4Kd+tMZHEu5ZXjODXeCJ/gYANNljwSf5ovpif8ju8+ze++d7LPU2f+bO/9duf+w9fAqd//MS7br4XPPhvbnj3kxUufuje2xz9GczepT9XBd1N9a5S4eJq7zWW3wlP/aHbX/zcrfBuT3nTl3+5b4affKXf+Ma//XjYee2t2fwSvPpjXubnHrKCn37Ub77D3z8S1gfjU6YPhyD+Nj4c2h/nu7dvhZd/pRd7jQfvQn1E/Y1yA2xsz1+7ezD82Z///bvd/pbw9E+/87UvXIQ3fLNXufGR3wgxi0/WCOd/4tK5ozeG2Vt1P1l",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "text",
+   "text": "The image is small. Let me upscale and crop the panels to read the text."
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'cd /tmp; python3 - <<\\'EOF\\'\\nfrom PIL import Image\\nim=Image.open(\\'/tmp/x7.png\\').convert(\\'RGB\\')\\nw,h=im.size\\nprint(\"size\",w,h)\\n# Upscale 3x\\nbig=im.resize((w*3,h*3),Image.LANCZOS)\\nbig.save(\\'/tmp/x7_big.png\\')\\n# Crop regions: left column (task+dag), right top (success), right bottom (failure)\\n# right column roughly x>0.45w\\nim.crop((int(w*0.45),0,w,int(h*0.55))).resize((int(w*0.55*4),int(h*0.55*4)),Image.LANCZOS).save(\\'/tmp/x7_success.png\\')\\nim.crop((int(w*0.45),int(h*0.5),w,h)).resize((int(w*0.55*4),int(h*0.5*4)),Image.LANCZOS).save(\\'/tmp/x7_failure.png\\')\\nim.crop((0,0,int(w*0.46),h)).resize((int(w*0.46*4),h*4),Image.LANCZOS).save(\\'/tmp/x7_left.png\\')\\nprint(\"done\")\\nEOF', 'description': 'Upscale and crop figure panels'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "size 996 483\ndone\nShell cwd was reset to /tmp/taxjudge-fn540f_d",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/tmp/x7_left.png'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "[{'type': 'image', 'source': {'type': 'base64', 'data': '/9j/4AAQSkZJRgABAgAAAQABAAD/wAARCAJXAjgDAREAAhEBAxEB/9sAQwAQCwwODAoQDg0OEhEQExgoGhgWFhgxIyUdKDozPTw5Mzg3QEhcTkBEV0U3OFBtUVdfYmdoZz5NcXlwZHhcZWdj/9sAQwEREhIYFRgvGhovY0I4QmNjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2Nj/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDz+gAoA1tO/wCPQf7xrso/Cc9T4i1WpmFABkeooAKACgAoAKADNAB16UAFABQAUALQAUAJQAUAFABQAtACUALQAUAFABQAnTrQAZB6EUAFABQAUAFABkDqaADI9RQAUAFABketAC0AJQAUAGR6j86ADIPQ0AFABQAUAFABQAtABQAlAGdqv3ovoa5q/Q2pdShXObBQAUAFABQAUAFABQAUAFABQAUAFABQAUAFABQAUAFABQAUAa2nf8eg/wB412UfhOep8RarUzNfQLSGZrq4nQSLaxFxGejHtms6jasl1LiupBb6pILkPcRxyoc5TywPyxTcNNBKXcfb6Q14Y/JuI2klVnCAH5fYnsaHO241G5HBpU01rHc5KxOSNwQsFwcfNjpTc0nYSjpcdHpMjQwSvKEW4YrF8pbcB39hS5w5SlPE9vPJDIMPGxVh7irTuriehsXyDStMslt1TzbhPMklZQxPoBnpWUfek7lv3UrFCW+WWzRZbeN5EcsW24DjHQ4q1GzJvoT69BDBPaiCJY1a3Vyq+ppU22ncclYy6sgWgDSiW1s7G3nntUuXuGPDkgIg9Md6h3baTL0S1JIItNuJ74xRybQhaBScBRjqfek3JJArO5kDoPpWhBo6VYQXq3BmufKMabgNufx+lROTWxUUmRQWST3TwpdptUZEmw/N9B1puVlewJXZONFn+3SWrOqmOMSlgM5U9CB6+1LnVrj5Xew+Gwihv2tpBHdb4WZSMgqe3HrScm1fYEtbFXULEWLKhuEkkIyyBSCnsfeqjLmE1YTTLdLq9SOTPlhWdgOpAGSKJOyBK7LiwWl5HBcLb/Z08/ypEiycg9CM9/Wpu1oOyepYv9PgSEGSCG2/0gRh4HLjb33ehpRkxtIS901fsl4w0/7MLbBjlBP70e/r+FClqtdwcdHoZFkxS9gIxnzFHIyOvpWktiFua9w8aaleLdmD7MFYBFADbu2MVmr2Vi3u7mfCsbaPcv5a70kUB++Kt/EiehTVSxwoJPoKokd5Mv8Azzb8qLodhGikUZZGA9SKLgaWgDfcXKEIR9nZhvAIB9eaipsiokE7OkIhmeNg4Db41BC8+o601vdCY25sRbBi864",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "text",
+   "text": "The failing model is confirmed as MiniMax-M2. Let me read the right column panels."
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/tmp/x7_success.png'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/tmp/x7_failure.png'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "[{'type': 'image', 'source': {'type': 'base64', 'data': 'iVBORw0KGgoAAAANSUhEUgAABEcAAAHjCAIAAABO8eaGAAIesUlEQVR4Ae3AA6AkWZbG8f937o3IzKdyS2Oubdu2bdu2bdu2bWmMnpZKr54yMyLu+Xa3anqmhztr1a/ec8lcddVVV1111VVXXXXVVVf9T2XbpuskODgan3zbvb/zp0/8ld//+6fddrbryuZiFlx11VVXXXXVVVddddVVV/3vBADBVVddddVVV1111VVXXXXV/04AEFx11VVXXXXVVVddddVVV/3vBADBVVddddVVV1111VVXXXXV/04AEFx11VVXXXXVVVddddVVV/3vBADBVVddddVVV1111VVXXXXV/04AEFx11VVXXXXVVVddddVVV/3vBADBVVddddVVV1111VVXXXXV/04AEFx11VVXXXXVVVddddVVV/3vBADBVVddddVVV1111VVXXXXV/04AEFx11VVXXXXVVVddddVVV/3vBADBVVddddVVV1111VVXXXXV/04AEFx11VVXXXXVVVddddVVV/3vBADBVVddddVVV1111VVXXXXV/04AEFx11VVXXXXVVVddddVVV/3vBADBVVddddVVV1111VVXXXXV/04AEFx11VVXXXXVVVddddVVV/3vBADBVVddddVVV1111VVXXXXV/04AEFx11VVXXXXVVVddddVVV/3vBADBVVddddVVV1111VVXXXXV/04AEFx11VVXXXXVVVddddVVV/3vBADBVVddddVVV1111VVXXXXV/04AEFx11VVXXXXVVVddddVVV/3vBADBVVddddVVV1111VVXXXXV/04AEFx11VVXXXXVVVddddVVV/3vBADBVVddddVVV1111VVXXXXV/04AEFx11VVXXXXVVVddddVVV/3vBADBVVddddVVV1111VVXXXXV/04AEFx11VVXXXXVVVddddVVV/3vBADBVVddddVVV1111VVXXXXV/04AEFx11VVXXXXVVVddddVVV/3vBADBVVddddVVV1111VVXXXXV/04AEFx11VVXXXXVVVddddVVV/3vBADBVVddddVVV1111VVXXXXV/04AEFx11VVXXXXVVVddddVVV/3vBADBVVddddVVV1111VVXXXXV/04AEFx11VVXXXXVVVddddVVV/2nMzb/0QCgctVVV1111VVXXXXVVVdd9Z9OiP9wAFDBXHXVVVddddVVV1111VVX/WcRmGcS/6EAoJLmqquuuuqqq6666qqrrrrqP4t5FhkF/3EAoKoPrrrqqquuuuqqq6666qqr/lMJgMQJ5j8KANR2uOaqq6666qqrrrrqqquuuuo/m60IalUJAPPvBwB173d/i6uuuuqqq6666qqrrrrqqv8kQhG5HmhTd+aa+aMf25857sRDEsG/DwDUcz/43Vx11VVXXXXVVVddddVVV/2nsCJU67R3KZfLzZd5+TOnz8xvPp6Dc5kCIvh3AIB68Od/zFVXXXXVVVddddVVV1111X8KE6Gua+fPt8PDmM3ycF+gACcE/z4AUHMcuOqqq6666qqrrrrqqquu+k9hRQA5DjkOOU62AQwIzL8PAFR1HVddddVVV1111VVXXXXVVf8ZjCKonbpOXVWtIP7jAEAlk6uuuuqqq6666qqrrrrqqv8cNnI6k0yc/IcCgIrEVVddddVVV1111VVXXXXVfxaBJCEh8R8KACo2V1111VVXXXXVVVddddVV/0lkMDY2Nv+hAKDybybxwtlcddVVV1111VVXXXXVVVf9pwGAyr+NBCAJDNgAEoDNVVddddVVV1111VVXXXXVfz4AqJIM2PyrZDoTO0ESEjaAxGWSACSuuuqqq6666qqrrrrqqqv+cwBAJUK2AZt/LUncT+J+iuCqq6666qqrrrrqqquuuuo/GQDUdnREhEpRKQA2/yJJpUStigCciQ0gAW7NrWEjAdhcddV",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "[{'type': 'image', 'source': {'type': 'base64', 'data': 'iVBORw0KGgoAAAANSUhEUgAAAiMAAAEJCAIAAADJl7ArAAD/rElEQVR4Ae3AA6AkWZbG8f937o3IzKdyS2Oubdu2bdu2bdu2bWmMnpZKr54yMyLu+Xa3anqmhztr1S+46qqrrrrqqv88EFx11VVXXXXVfx4Irrrqqquuuuo/DwRXXXXVVVdd9Z8Hgquuuuqqq676zwPBVVddddVVV/3ngeCqq6666qqr/vNAcNVVV1111VX/eSC46qqrrrrqqv88EFx11VVXXXXVfx4Irrrqqquuuuo/DwRXXXXVVVdd9Z8Hgquuuuqqq676zwPBVVddddVVV/3ngYqCq6666qqrrvoP5wQAcdVVV1111VX/GRQAztotjnHVVVddddVV/0GEUbQ2tfUBANQTL/dBXHXVVVddddV/kMxW+0X18r6//IFpve9p0Ot84Hdy1VVXXXXVVf8RBOthOntxf//goK9lPDx7zx9/i55y9x5XXXXVVVdd9e9nwBHxt0+6+2u/51effPeaYffeP/4WXVyaq6666qqrrvqPIEhTK3//5Hs/4nN/4I57Lsz7qEdLc9VVV1111VX/QVp6MdfDbzn9Oq/02B/55T9zdLUUcdVVV1111VX/ESQi1ZohHvmQ67oSq9VR5aqrrrrqqqv+g9iAJSSVIiRUKlddddVVV131n8BchitXXXXVVVdd9Z9AXIaCq6666qqrrvrPA8FVV1111VVX/eeB4Kqrrrrqqqv+80Bw1VVXXXXVVf95ILjqqquuuuqq/zwQXHXVVVddddV/Hgiuuuqqq6666j8PBFddddVVV131nweCq6666qqrrvrPA8FVV1111VVX/eeB4Kqrrrrqqqv+80Bw1VVXXXXVVf95ILjqqquuuuqq/zwQXHXVVVddddV/Hgiuuuqqq6666j8PBFddddVVV131nweCq6666qqrrvrPA8FVV1111VVX/eeB4Kqrrrrqqqv+80Bw1VVXXXXVVf95ILjqqquuuuqq/zwQXHXVVVddddV/Hgiuuuqqq6666j8PBFddddVVV131nweCq6666qqrrvrPA8FVV1111VVX/eeB4Kqrrrrqqqv+80Bw1VVXXXXVVf95ILjqqquuuuqq/zwQXHXVVVddddV/Hgiuuuqqq6666j8PBFddddVVV131nweCq6666qqrrvrPA8FVV1111VVX/eeB4Kqrrrrqqqv+80Bw1VVXXXXVVf95ILjqqquuuuqq/zwQXHXVVVddddV/Hgiuuuqqq6666j8PBFddddVVV131nweCq6666qqrrvrPA8FVV1111VVX/eeB4Kqrrrrqqqv+80Bw1VVXXXXVVf95ILjqqquuuuqq/zwQXHXVVVddddV/Hqi2ueqqq6666qoXmUEgiRcF1BJcddVVV1111b+KweZFAtU2V1111VVXXfWiEhgA8aKA+lN/+WNcddVVV1111YvEoRjb2NfZG734m270G0NzSLwQUL/5t76cq6666qqrrnrR1FIP1vvH5idf+9GvfmxjYzVmKcW8YFDHNnDVVVddddVVLwKDneM0DG0ExIsAald6rrrqqquuuupFU0vtWt/XDjAvAqjp5N/HWIgXTSjSyQtlHAohY9tcddVVV131P4NtKTKzZQLiRQDBv1tR4UUgJDRMg21eqKLSsq3GVcsmiauuuuqqq/5nkBAA4kUGwb+SEM9paAP/EoFxc5t1M0m8AELAelxL2p5vC41t5Kqrrrrqqv8ZzL8e1FBIAmdaUjolhQJIp5CxbUCSUDpDYWxbktCszmwbY4wBY+4nBEgxTOubTt70di/3Nn/w5D/8y2f8VYkCGHM/IWDK6cTWidd61Gs+5oZH33b+9p//6184WB+UKLa56qqrrrrqfx2I1bhaDsvD9dF6Wq+nNTBMw9FwdLg+Wo3r5bhs2QChzDwajsY2Hg1HLVuJculob9bN3uf",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "text",
+   "text": "Let me capture the full right column including text that's cut off on the right edge."
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'cd /tmp; python3 - <<\\'EOF\\'\\nfrom PIL import Image\\nim=Image.open(\\'/tmp/x7.png\\').convert(\\'RGB\\')\\nw,h=im.size\\n# Full success panel band\\nim.crop((int(w*0.46),int(h*0.12),w,int(h*0.52))).resize((int(w*0.54*4),int(h*0.40*4)),Image.LANCZOS).save(\\'/tmp/s_full.png\\')\\n# Full failure panel band\\nim.crop((int(w*0.46),int(h*0.58),w,h)).resize((int(w*0.54*4),int(h*0.42*4)),Image.LANCZOS).save(\\'/tmp/f_full.png\\')\\nprint(\"ok\")\\nEOF', 'description': 'Re-crop full-width panels'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "ok\nShell cwd was reset to /tmp/taxjudge-fn540f_d",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/tmp/s_full.png'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/tmp/f_full.png'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "[{'type': 'image', 'source': {'type': 'base64', 'data': 'iVBORw0KGgoAAAANSUhEUgAABDIAAAGVCAIAAACD6kaGAAIGo0lEQVR4Ae3AA6AkWZbG8f937o3IzKdyS2Oubdu2bdu2bdu2bWmMnpZKr54yMyLu+Xa3anqmhztr1a/+0k03cdVVV1111VVXXXXVVVdd9YJI6vt24Xzb3995rde76dM//8Rrv0JOnnYnaigK/xIb210nwcHR+JTb7v3tP3vir/7e3z/1trNdVzYXs+Cqq6666qqrrrrqqquuuuq/BwAQXHXVVVddddVVV1111VVXvSA2/4kAgIrEVVddddVVV1111VVXXXXV8xBYkgTiPwUAUFUKV1111VVXXXXVVVddddVVD2QDSAIBEv8pAIDaDg+56qqrrrrqqquuuuqqq656IAnAxlatmgtj/sMBANWtcdVVV1111VVXXXXVVVdd9TwM2CHJBsR/OACgbjzoQVx11VVXXXXVVVddddVVVz0vSVJOU47TsHfJmP9gAEC95nVeh6uuuuqqq6666qqrrrrqqmeRsJ0Zs1nUuj5/fv9JTxrvuZu0JB5A/DsBAPWa13s9rrrqqquuuuqqq6666qqrnkUi062Vzc2YzQ6f+tRxb28/wjb/wQCAeuwlXoKrrrrqqquuuuqqq6666qpnkZzJNJWdnVgsotYLf/qnSBgkLhMABvHvAQDU/sQJrrrqqquuuuqqq6666qqrHsC2pym2tui6bmcn+h7xnwAAqM7kqquuuuqqq6666qqrrrrqgTLJxAZsY/OfAgCouV5z1VVXXXXVVVddddVVV131LJIzmSbN56o1h8GZ/KcAAKoiuOqqq6666qqrrrrqqquuehYJcIQkIiTxnwUAqEhcddVVV1111VVXXXXVVVc9kCQJCUBC4j8FABBcddVVV1111VVXXXXVVVf99wAAgquuuuqqq6666qqrrrrqqv8eAEBw1VVXXXXVVVddddVVV1313wMACK666qqrrrrqqquuuuqqq/57AADBVVddddVVV1111VVXXXXVfw8AILjqqquuuuqqq6666qqrrvrvAQAEV1111VVXXXXVVVddddVV/z0AgOCqq6666qqrrrrqqquuuuq/BwAQXHXVVVddddVVV1111VVX/fcAAIKrrrrqqquuuuqqq6666qr/HgBAcNVVV1111VVXXXXVVVdd9d8DAAiuuuqqq6666qqrrrrqqqv+ewAAwVVXXXXVVVddddVVV1111X8PACC46qqrrrrqqquuuuqqq6767wEABFddddVVV1111VVXXXXVVf89AIDKVVddddVV/+8YAyDxr2D+ZeKqq6666qqr/hUAgOCqq6666qr/bwwYDOZFZWzMv8RcddVVV1111b8CAFC56qqrrrrq/5soUgHbjUwk/gVCocAGzDMJkAAAGzA2NldIPH/GPJMAcdVVV1111f9fAEDlqquuuuqq/18MBgNgMADiRWKcGASEJACDALBx2hYggXg+jAFjAyAkrrrqqquu+v8LAKhcddVVV131/4ckwm1s0x4oug2V3k7cQDxfEpluk7FUKAUFmJyyJZgrFIqqOoso2JkTOYF4DgIRkgKFJGfaE5lIXHXVVVdd9f8RAFC56qqrrrrq/z5DgLHd1uPePePuMyj97PQj6871ysk5IfFcbKJIyly3o4s5rqJ01F6SbdrknIwBAVGjzmO2Ff0CAhsbQOLZDIBAIECyzVVXXXXVVf+PAQCVq6666qqr/s+zKUWKtro0nH3S0W1/sr73iWXjBCbm21FnIJ4Po6AUL9fjhVuH3dvdBmfztFLUmG1Ft0CBhO02uI2Kvm6e6o7dUI/dGP2mnWRDAiFJOJM2tGnwcJjjkeqsLE5Gv2EnbiCuuuqqq676/wUAqFx11VVXXfV/m+1s0RXVWe7ecXTbn+7+zU+s73lyf/qWunP97OSDtX0tCgSZSDyTbYcCits4Hdy7uvv",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "[{'type': 'image', 'source': {'type': 'base64', 'data': 'iVBORw0KGgoAAAANSUhEUgAAAhkAAADBCAIAAADtijW3AADw+UlEQVR4Ae3AA6AkWZbG8f937o3IzKdyS2Oubdu2bdu2bdu2bWmMnpZKr54yMyLu+Xa3anqmhztr1a/ec8lcddVVV1111YvMJsKSfu63/uYLvvkXVquxctVVV1111VX/OubZAIKrrrrqqquu+rcDCK666qqrrrrq3w4guOqqq6666qp/O4Dgqquuuuqqq/7tAIKrrrrqqquu+rcDCK666qqrrrrq3w4guOqqq6666qp/O4Dgqquuuuqqq/7tAIKrrrrqqquu+rcDCK666qqrrrrq3w4guOqqq6666qp/O4Dgqquuuuqqq/7tAIKrrrrqqquu+rcDqLa56n8qg7jqqquu+q9jEBgEkviXAdQS4qqrrrrqqqueRQCYNC8CgDrlyFVXXXXVVVc9N4UKiH8BQP2hP/4errrqqquuuuoy2xFlnNazbvE2L/f2W7Ot9eSQeIEA6nf+3tdz1VVXXXXVVc/kWrqD1f6xjZNv9lJv3G1sLYcspZgXBKCGxFVXXXXVVVddZiQpJCFeJAC1ROU/jgEMEv8CYy4T4qqrrrrqqv8ZjItqiVqi8iIBqOnkX2IsxIumKBKnzQtmHIpQ2E4nV1111VVX/c9gnM50ppMXCUDwIqhReREICR2Ny5aNF6pGndp0sDoY2hASV1111VVX/c8gEADiRQQQPA9J3E/IeDksASFeMKF0NrdTmyf70hvz/AgBh+vDWe1vOnnTvJuvp4Grrrrqqqv+ZzD/WgA1FMa2gVBIatmKwjht4xp1e3N7OS7TKWQbMOYBhBBTmx5+zcPf6RXf4Xef/Pt/8KQ/iAgh2wgAI8l4yunBpx/0Wo9+zYededj5wws//mc/cXbvbIlizFVXXXXVVf/LAMThcDi1CZA0tnFvuTe1aX99MLapRt09utSV7gNf+/0xFw8vZqaxpL70szqbldmszrrS1ajrcb0133rXV3nnYxvHHnntw2upmdnXbtbNZnU2q7O+9l3pVuP6huPXf8wbfrSIX/n7X32JG1/s5R/8sulMUhJXXXXVVVf9LwNQX+uRr/k3d/ztclgK9bV/xYe+4vXHrjt7cPYvnv6Xxg+75qEvc8tLvdajXvPPn/7n5w7O7a0O7rhwxzAN51cX0hlSOrvSb802S5TXfczrzursd574u9dsnZnV2Xpa7x5dOhqWQsYloivdscWxN3ix179weP7X/+HX19PwZb/0FQerg1oqYJurrrrqqqv+lwGoH/w6H/gjf/pjP/c3P9+V7q1e5i1f6uaXeMb5217poa94/bHrf+6vf/6xNz721R/56huzjdd41KsfrA7+9o6/v/38bdvz7Ze+5aVCkc6iMrbxL2/7q4dd89DXfcxrffkvf9VNJ2687th1B6uDovKI6x+xvdjCACXKk+59yrz2L/fgl73t/G1v+/Jvs9lv/cnT/uT3nvT7oYgI21x11VVXXfW/DED96b/62Ze65SV/9e9/9aaTN7/bq7zLN/3Wt/zp0/7s1R/56h/xeh/6R0/5ox/7sx9/+n1Pe8jph3zTb37rXbt3bcw2xjY96tTNn/AmH78z3zoalscWO4+/+wkXf2X3nV7xHR935+P3lntnbnmp44udncXOaly9zcu91as/4lWnnEoU29/4W9/6F0//izPbZ7rovvG3vuXmkze972u89zANf/TUP+7UCRlz1VVXXXXV/yYA9fzheaAr3Y3Hb1h0i1d8yCs89vrHnNo+/bSzTytRAq2mdfN0NBwerY+ObxzPmk+992kf8f0fJWG7lrp7dOnBpx/8yg97pV//h994y5d680fd8Kjrdq5945d4w5/8i5/6pt/85u/6ve9OJ6JGvffSvTeeuGlvufe9f/j9f/q0P/3b2/92Xuev85jX/otn/OUwDbM6s81VV1111VX/mwD",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "text",
+   "text": "I now have all the source material I need. Let me compose the factual account.\n\n---\n\n## Source material located\n\n- **Paper:** Zhu et al. (2026), *\"When Tools Fail: Benchmarking Dynamic Replanning and Anomaly Recovery in LLM Agents\"* — arXiv:2606.05806. The benchmark is named **ToolMaze**.\n- **Dataset:** `dongsheng/ToolMaze` on HuggingFace, file `perturbed_tasks/c1/C1_task_089_P1.json` (the canonical task spec + reference trace).\n- **Figure 7** (Appendix E, \"Case Studies\"): image `x7.png`, captioned *\"𝒞1 𝒫1 — Explicit-Transient (C1_task_089).\"* It is a two-panel case study contrasting a **Success** model (`claude-sonnet-4-6`) against a **Failure** model (**MiniMax-M2.7**) on the same task instance.\n\n---\n\n# Chronological account of the MiniMax-M2.7 failure (C1_task_089, P1)\n\n## The task it was given\n\nThe agent was run on a ToolMaze **C1** task. C1 is the simplest topology class: a **linear DAG** — a single valid tool-call path with no alternative routes. The instance was perturbed under mode **P1 = Explicit-Transient**: a machine-readable error (here an HTTP 500) is injected at one pre-designated \"victim\" node on its **first** call, and the call succeeds if retried. The victim node in this task is the `convert_datetime` tool.\n\nThe user query (domains: Shopping, General) was:\n\n> \"Hi, for user_123, please reserve 1 black Sony XM5 for me using product_id p_sony_xm5_blk. … After you place the hold, please prepare the checkout from that reservation and let me know exactly when the reservation expires. Then suggest some popular alternatives in the same category, and send me an in-app notification with all the details.\"\n\nThe canonical (ground-truth) solution path, per the dataset task file, is a five-stage linear chain:\n\n1. `hold_inventory` → returns `reservation_id RESV-14729548`, `expiry_time 1710000300`.\n2. `build_checkout_from_hold` → builds checkout from that hold.\n3. `convert_datetime(timestamp=1710000300)` → **first call returns `{\"error\": \"Internal Server Error\"}`, status `error`, `is_perturbed: true`**; the **retry** returns `{\"formatted_time\": \"2024-03-09 16:05\"}`, status `success`.\n4. `get_recommendations_popularity` → returns the Sony WH-1000XM5 (Silver) and Apple AirPods Pro 2 as alternatives.\n5. `create_document_and_alert_from_data` → sends the in-app notification.\n\nSo a passing run under P1 requires `convert_datetime` to be called **at least twice** (one injected failure + one successful retry) before the datetime-dependent downstream work can complete.\n\n## What the Success model did (reference point in the figure)\n\nThe green panel (`claude-sonnet-4-6`) executed: `hold_inventory` → `build_checkout_from_hold` → `convert_datetime` (marked \"! P1\", errored) → `convert_datetime` (\"retry ✓\", succeeded) → `get_recommendations_popularity` → `create_document_and_alert_from_data`. Verdict: **PASS — all 5 steps completed successfully**, ending with a clean summary (\"Reservation ID: RESV-14729548 … Sony …XM5 (Black) — p_sony_xm5_blk — Quantity: 1 — Total Price: $399…\").\n\n## What MiniMax-M2.7 did (the Failure panel)\n\nThe red **Failure** panel, labeled **MiniMax-M2.7**, shows the following observable sequence:\n\n1. Called `hold_inventory` — proceeded normally.\n2. Called `build_checkout_from_hold` — proceeded normally.\n3. Called **`convert_datetime` exactly once**. This first call hit the injected P1 perturbation and returned the explicit error `convert_datetime: {\"error\": \"Internal Server Error\"}` (shown in the figure's \"Perturbed output\" box). The node is highlighted in orange/red with the marker \"! P1\".\n4. **MiniMax did not retry `convert_datetime`.** It never issued a second call to the tool, so it never obtained a successful datetime conversion.\n\n## The signal / verdict it received\n\nThe figure's caption and the failure panel's judge output state the outcome explicitly:\n\n- Caption: *\"the failing model calls the tool only once and abandons it, leaving the downstream pipeline incomplete.\"*\n- Judge verdict text in the panel: **\"FAIL — "
+  },
+  {
+   "turn": "judge",
+   "type": "text",
+   "text": "{\"evidence\": \"In ToolMaze C1_task_089 under P1 (Explicit-Transient), the victim tool convert_datetime returns an explicit HTTP-500 'Internal Server Error' on its first call but succeeds on retry. MiniMax-M2.7 called convert_datetime exactly once, received the 500 error, and did not retry. The judge scored it FAIL: 'no retry on convert_datetime (called 1 time(s), need >=2); convert_datetime never succeeded after retries; missing required tools: [convert_datetime]', whereas the Success model (claude-sonnet-4-6) simply called it a second time and recovered.\", \"reasoning\": \"The first/root failure is the model's reaction to a tool perturbation: an explicit, transient error that is trivially recoverable by a single retry. The agent neither retried nor pivoted, abandoning the tool after one call and leaving the datetime-dependent pipeline incomplete. This is not env—Service Failure, because the error is an injected, recoverable transient (not an unrecoverable external outage), and the benchmark's intent is to test recovery; the fault lies with the model, not the service. It is not Tool Feedback Neglect (which is ignoring a signal to pursue an unrelated plan) — here the model received a clear, actionable failure signal and failed specifically to navigate around the anomaly via retry. Tool Recovery Failure names exactly this: failing to dynamically recover from an explicit tool failure.\", \"category\": \"model — tool\", \"subtype\": \"Tool Recovery Failure\"}"
+  },
+  {
+   "turn": "reflect",
+   "type": "text",
+   "text": "{\"evidence\": \"Under ToolMaze C1_task_089 P1 (Explicit-Transient), the victim tool convert_datetime returns an explicit HTTP-500 error on its first call and succeeds on retry. MiniMax-M2.7 called convert_datetime exactly once, received the 500, and did not retry or pivot, leaving the datetime-dependent pipeline incomplete. The judge scored FAIL: 'no retry on convert_datetime (called 1 time(s), need >=2); convert_datetime never succeeded after retries; missing required tools: [convert_datetime]', while claude-sonnet-4-6 recovered by simply calling it a second time.\", \"reasoning\": \"Checked note 6/7 (Service Failure vs Mistranslation/Instruction-Following): the 500 is a deliberately injected *transient* perturbation that resolves on retry, not a genuine non-recoverable external outage, so the locus is not env(external)—Service Failure; the source was designed to recover. Checked the model—tool internal alternatives: not Tool Feedback Neglect (the model received and registered the error rather than ignoring a signal to pursue an unrelated plan) and not Malformed/Suboptimal Arguments (arguments were valid). The defining behavior — failing to dynamically navigate around an explicit tool failure by retrying/pivoting — matches Tool Recovery Failure verbatim ('explicit failure (e.g., HTTP 503)... instead of pivoting'). Notes 1-5 and 8-11 (context/memory/owner/subagent) do not apply: no compaction, no memory file, no instruction-grader mismatch (spec genuinely required recovery), and single-agent run.\", \"category\": \"model — tool\", \"subtype\": \"Tool Recovery Failure\", \"changed\": false, \"confidence\": \"high\"}"
+  }
+ ],
+ "leaks": []
+}

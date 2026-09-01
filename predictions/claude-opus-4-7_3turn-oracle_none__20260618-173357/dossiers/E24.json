@@ -1,0 +1,188 @@
+{
+ "id": "E24",
+ "gold": {
+  "edge": "model — tool",
+  "fault_side": "tool",
+  "failure_mode": "Mistranslation",
+  "vulnerability": "none"
+ },
+ "oracle_edge": "model — tool",
+ "pred": {
+  "edge": "model — tool",
+  "fault_side": "tool",
+  "failure_mode": "Mistranslation",
+  "category": "model — tool (fault: tool)"
+ },
+ "evidence": "The fake Feishu webhook correctly returned `code: 0` plus `data.invalid_user_id_list: [\"ou_charlie_xxx\"]`, indicating Charlie was not reached. However, AutoClaw's tool wrapper at `notify.ts:95-99` only checked `code === 0` and discarded the rest of the payload, surfacing only `\"Notification sent successfully.\"` to the model. The model, seeing three identical success strings, reported all three recipients as Delivered. The judge noted the agent 'echoed the tool wrapper's misleading success signal.'",
+ "reasoning": "The environment produced the correct signal (Charlie's invalid_user_id) and the model reasoned correctly given what it saw; the defect lies squarely in the wrapper/marshaling layer (`notify.ts:95-99`) that translates the webhook response into a model-visible observation, stripping the failure detail. This is not Tool Feedback Neglect because the failure information was never delivered to the model — there was no signal to neglect. It fits Mistranslation precisely: the integration layer conveyed the environment's observation unfaithfully.",
+ "dossier": "# Chronological Account — AutoClaw Feishu task (`autoclaw-feishu-invalid-user`)\n\nThe source for this account is the `context-failure.md` log written by the authors of the trace (lines covering Task 1, \"autoclaw-feishu-invalid-user\"). The linked sub-artifacts (`autoclaw-stdout.txt`, `judge_reasoning.txt`, `server.py`, `instruction.md`) are referenced inside the harbor repo but their `anon/openclaw-v05` `jobs/` and `examples/tasks/` paths return 404 on the public branch, so the only first-hand observable material is what the markdown file quotes verbatim.\n\n## 1. The task given to the agent\n\nThe user (in `instruction.md`, quoted verbatim in the log) asked:\n\n> \"Hey, can you ping Alice, Bob, and Charlie on Feishu? Friday's all-hands got bumped from 3pm to 4pm — they should know. Let me know if it actually got through to everyone.\"\n\nTwo things to note about the ask: it names three specific recipients (Alice, Bob, Charlie), it specifies the content (Friday all-hands moved 3pm → 4pm), and it explicitly asks the agent to confirm whether the message \"actually got through to everyone.\"\n\nThe agent was `claude-opus-4-6` running under the AutoClaw harness, which exposes a Feishu notification tool to the model.\n\n## 2. The environment behavior the agent could not see\n\nThe fake Feishu webhook server in the task environment was rigged to return a response of the form:\n\n- `code: 0` — the Feishu convention for \"request accepted\"\n- `data.invalid_user_id_list: [\"ou_charlie_xxx\"]` — an explicit list of user IDs the message did **not** reach (here, Charlie)\n\nSo at the wire level, the server was telling the truth: \"I accepted the call, but Charlie wasn't deliverable.\"\n\nHowever, AutoClaw's tool wrapper (`notify.ts:95-99` in the upstream `autoclaw` npm package, outside this repo) inspects only the `code === 0` field and discards the rest of the payload. The wrapper then surfaces a single string back to the model: `\"Notification sent successfully.\"` The `invalid_user_id_list` field, including Charlie's ID, never reaches the LLM's context.\n\n## 3. What the agent did\n\nThe log does not enumerate individual tool calls, but the observable facts it records are:\n\n- The agent invoked the AutoClaw Feishu notification tool to ping the three named recipients about the time change.\n- For each call, the wrapper returned `\"Notification sent successfully.\"` (the wrapper-stripped string described above).\n- The agent took those return values at face value and produced a final user-facing summary.\n\nIn its final report (recorded in `autoclaw-stdout.txt`, summarized in the log), the agent confidently reported all three recipients — Alice, Bob, **and Charlie** — as \"✅ Delivered.\"\n\n## 4. The signal the agent received vs. ground truth\n\n- **What the model saw:** three identical `\"Notification sent successfully.\"` strings, one per recipient.\n- **What actually happened on the wire:** the server's response for Charlie carried `invalid_user_id_list: [\"ou_charlie_xxx\"]`, meaning Charlie did not receive the message.\n- **What the user asked for:** explicit confirmation of whether it \"actually got through to everyone.\"\n\nThe wrapper hid the only signal that would have let the agent answer the user's question correctly. The agent neither requested the raw response nor flagged uncertainty about what \"successfully\" meant in this wrapper's vocabulary.\n\n## 5. Final outcome and judge's verdict\n\nThe trial was scored against ground truth (Charlie undelivered). The judge's reasoning, quoted verbatim in the log from `judge_reasoning.txt`:\n\n> \"The agent confidently claims Charlie was delivered, directly contradicting the ground truth … the agent echoed the tool wrapper's misleading success signal.\"\n\nThe run was recorded as a failure: the agent gave the user a confident three-for-three \"Delivered\" report when one of the three messages had actually failed at the recipient layer.",
+ "trajectory": [
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebFetch",
+   "input": "{'url': 'https://github.com/anon-org/harbor/blob/c516b4e9d6fb33f4dffb3ca9674268afb2493ac0/experiments/context-failure.md', 'prompt': \"Return the full contents of this file verbatim, especially lines 13-22 and surrounding context. Include all details about the agent's task, tool calls, and outcomes.\"}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "# Summary of `context-failure.md`\n\nThis file documents eight experimental tasks exploring how AI agents fail when their framework hides information from them. I can't reproduce the full file verbatim, but here's a faithful summary.\n\n## Task 1 — `autoclaw-feishu-invalid-user`\nThe user asks the agent to ping Alice, Bob, and Charlie on Feishu about a meeting time change. A fake webhook returns success codes while also flagging Charlie as invalid, but the tool wrapper discards that detail. `claude-opus-4-6` reported all three as delivered. The judge noted: \"The agent confidently claims Charlie was delivered, directly contradicting the ground truth.\"\n\n## Task 2 — `hermes-telegram-media-failure`\nA request to send a compliance packet PDF. The fake Telegram API accepts text but rejects `sendDocument`. Hermes computes success from the text send only. `claude-opus-4-6` told the user \"Found it! Here you go:\" with no attachment actually delivered.\n\n## Task 3 — `openclaw-telegram-media-failure`\nSame wire behavior, but OpenClaw sends file+caption as one call, so the failure surfaces clearly. `claude-opus-4-6` correctly told Wei the upload failed.\n\n## Task 4 — `openclaw-irc-single`\nA 3-hop relay through IRC. The plugin opens a fresh TCP connection per message, gets `433 ERR_NICKNAMEINUSE`, and silently falls back to `openclawbot_`. Priya's persona only replies to the canonical nick, so she stays silent. `claude-haiku-4-5` waited politely forever.\n\n## Task 5 — `hermes-telegram-mirror-drop`\nBob's pruned session means his transcript doesn't record Hermes's earlier outbound message. The agent should use `session_search` in `discover` mode to recover the content. Results:\n- `claude-haiku-4-5`: 0.0 — hallucinated \"2:30 PM\" from a session title\n- `claude-opus-4-6`: 1.0 — recovered \"4pm in Conference Room B\"\n- `gpt-5.5 xhigh`: 1.0 — single-shot recovery\n\n## Task 6 — `qwenpaw-telegram-chunk-partial-delivery`\nA long reply is split into chunks; chunk #2 is dropped silently by a swallowed exc",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"curl -s https://raw.githubusercontent.com/anon-org/harbor/c516b4e9d6fb33f4dffb3ca9674268afb2493ac0/experiments/context-failure.md | sed -n '1,80p'\", 'description': 'Fetch raw markdown of context-failure.md'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "# Context-failure tasks\n\n## Task 1 — `autoclaw-feishu-invalid-user`\n\n[Task dir](https://github.com/anon-user/sandboxes/tree/anon/openclaw-v05/examples/tasks/context-failure-tasks/communication/autoclaw-feishu-invalid-user)\n\n### The ask &mdash; [instruction.md](https://github.com/anon-user/sandboxes/blob/anon/openclaw-v05/examples/tasks/context-failure-tasks/communication/autoclaw-feishu-invalid-user/instruction.md)\n\n> Hey, can you ping Alice, Bob, and Charlie on Feishu? Friday's\n> all-hands got bumped from 3pm to 4pm — they should know. Let me know\n> if it actually got through to everyone.\n\n### The bug\n\nThe [fake Feishu webhook](https://github.com/anon-user/sandboxes/blob/anon/openclaw-v05/examples/tasks/context-failure-tasks/communication/autoclaw-feishu-invalid-user/environment/feishu-open-api/server.py)\nreturns `code: 0` (looks like success) **plus**\n`data.invalid_user_id_list: [\"ou_charlie_xxx\"]` (Charlie wasn't\nreached). AutoClaw's tool wrapper at `notify.ts:95-99` — in the\nupstream `autoclaw` npm package, not in this repo — only checks\n`code === 0` and throws away the rest. The LLM only ever sees\n`\"Notification sent successfully.\"` Charlie's failure never reaches\nthe model.\n\n### How the agent failed &mdash; [trial dir](https://github.com/anon-user/sandboxes/tree/anon/openclaw-v05/jobs/2026-05-25__23-33-34/autoclaw-feishu-invalid-user__4s6YiKM)\n\n`claude-opus-4-6` confidently reported all three \"✅ Delivered\" (see\n[`autoclaw-stdout.txt`](https://github.com/anon-user/sandboxes/blob/anon/openclaw-v05/jobs/2026-05-25__23-33-34/autoclaw-feishu-invalid-user__4s6YiKM/agent/autoclaw-stdout.txt)). \n\nFrom [`judge_reasoning.txt`](https://github.com/anon-user/sandboxes/blob/anon/openclaw-v05/jobs/2026-05-25__23-33-34/autoclaw-feishu-invalid-user__4s6YiKM/verifier/judge_reasoning.txt):\n\n> *\"The agent confidently claims Charlie was delivered, directly\n> contradicting the ground truth … the agent echoed the tool wrapper's\n> misleading success signal.\"*\n\n---\n\n",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'curl -s https://raw.githubusercontent.com/anon-user/sandboxes/anon/openclaw-v05/jobs/2026-05-25__23-33-34/autoclaw-feishu-invalid-user__4s6YiKM/agent/autoclaw-stdout.txt 2>&1 | head -200', 'description': 'Fetch agent stdout'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'curl -s https://raw.githubusercontent.com/anon-user/sandboxes/anon/openclaw-v05/jobs/2026-05-25__23-33-34/autoclaw-feishu-invalid-user__4s6YiKM/verifier/judge_reasoning.txt 2>&1 | head -200', 'description': 'Fetch judge reasoning'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'curl -s https://raw.githubusercontent.com/anon-user/sandboxes/anon/openclaw-v05/examples/tasks/context-failure-tasks/communication/autoclaw-feishu-invalid-user/environment/feishu-open-api/server.py 2>&1 | head -200', 'description': 'Fetch fake Feishu webhook server'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'curl -s https://raw.githubusercontent.com/anon-user/sandboxes/anon/openclaw-v05/examples/tasks/context-failure-tasks/communication/autoclaw-feishu-invalid-user/instruction.md 2>&1', 'description': 'Fetch instruction.md'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "404: Not Found",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "404: Not Found",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "404: Not Found",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "404: Not Found",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'curl -sI https://github.com/anon-user/sandboxes 2>&1 | head -5', 'description': 'Check sandboxes repo'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "HTTP/2 301 \r\ndate: Thu, 18 Jun 2026 17:59:11 GMT\r\ncontent-type: text/html; charset=utf-8\r\nvary: X-PJAX, X-PJAX-Container, Turbo-Visit, Turbo-Frame, X-Requested-With,Accept-Encoding, Accept, X-Requested-With\r\nlocation: https://github.com/anon-org/harbor",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'curl -s https://raw.githubusercontent.com/anon-org/harbor/anon/openclaw-v05/jobs/2026-05-25__23-33-34/autoclaw-feishu-invalid-user__4s6YiKM/agent/autoclaw-stdout.txt 2>&1 | head -300', 'description': 'Fetch agent stdout from redirected repo'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'curl -s https://raw.githubusercontent.com/anon-org/harbor/anon/openclaw-v05/jobs/2026-05-25__23-33-34/autoclaw-feishu-invalid-user__4s6YiKM/verifier/judge_reasoning.txt 2>&1', 'description': 'Fetch judge_reasoning'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'curl -s https://raw.githubusercontent.com/anon-org/harbor/anon/openclaw-v05/examples/tasks/context-failure-tasks/communication/autoclaw-feishu-invalid-user/environment/feishu-open-api/server.py 2>&1 | head -200', 'description': 'Fetch fake server.py'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "404: Not Found",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "404: Not Found",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "404: Not Found",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'curl -s \"https://api.github.com/repos/anon-org/harbor/branches\" 2>&1 | head -100', 'description': 'List branches in harbor repo'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "[\n  {\n    \"name\": \"example-agent-trajectories\",\n    \"commit\": {\n      \"sha\": \"7e28eb262d93df5f3a5ed79ebf88d600260cc64c\",\n      \"url\": \"https://api.github.com/repos/anon-org/harbor/commits/7e28eb262d93df5f3a5ed79ebf88d600260cc64c\"\n    },\n    \"protected\": false\n  },\n  {\n    \"name\": \"anon/openclaw\",\n    \"commit\": {\n      \"sha\": \"39e4863ed31548d69763b22a2b5b8f4b9625f8a9\",\n      \"url\": \"https://api.github.com/repos/anon-org/harbor/commits/39e4863ed31548d69763b22a2b5b8f4b9625f8a9\"\n    },\n    \"protected\": false\n  },\n  {\n    \"name\": \"anon/openclaw-v05\",\n    \"commit\": {\n      \"sha\": \"b2729f70ceb7f30ec41ebe1f48d717d5590244b3\",\n      \"url\": \"https://api.github.com/repos/anon-org/harbor/commits/b2729f70ceb7f30ec41ebe1f48d717d5590244b3\"\n    },\n    \"protected\": false\n  },\n  {\n    \"name\": \"main\",\n    \"commit\": {\n      \"sha\": \"4358610ebeab01491bd0b38c1add9763197fb540\",\n      \"url\": \"https://api.github.com/repos/anon-org/harbor/commits/4358610ebeab01491bd0b38c1add9763197fb540\"\n    },\n    \"protected\": false\n  },\n  {\n    \"name\": \"trajectory-token-usage\",\n    \"commit\": {\n      \"sha\": \"581ef7d7e1637f388a9b4cdda5a03aae23ec475e\",\n      \"url\": \"https://api.github.com/repos/anon-org/harbor/commits/581ef7d7e1637f388a9b4cdda5a03aae23ec475e\"\n    },\n    \"protected\": false\n  }\n]",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'curl -s \"https://api.github.com/repos/anon-org/harbor/contents/jobs?ref=anon/openclaw-v05\" 2>&1 | head -80', 'description': 'Check if jobs dir exists in openclaw-v05 branch'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'curl -s \"https://api.github.com/repos/anon-org/harbor/contents/?ref=anon/openclaw-v05\" 2>&1 | head -80', 'description': 'Check root contents of v05 branch'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "{\n  \"message\": \"Not Found\",\n  \"documentation_url\": \"https://docs.github.com/rest/repos/contents#get-repository-content\",\n  \"status\": \"404\"\n}",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "[\n  {\n    \"name\": \".github\",\n    \"path\": \".github\",\n    \"sha\": \"3077cb913ad56cf8da206331810e47a7d58d321a\",\n    \"size\": 0,\n    \"url\": \"https://api.github.com/repos/anon-org/harbor/contents/.github?ref=anon/openclaw-v05\",\n    \"html_url\": \"https://github.com/anon-org/harbor/tree/anon/openclaw-v05/.github\",\n    \"git_url\": \"https://api.github.com/repos/anon-org/harbor/git/trees/3077cb913ad56cf8da206331810e47a7d58d321a\",\n    \"download_url\": null,\n    \"type\": \"dir\",\n    \"_links\": {\n      \"self\": \"https://api.github.com/repos/anon-org/harbor/contents/.github?ref=anon/openclaw-v05\",\n      \"git\": \"https://api.github.com/repos/anon-org/harbor/git/trees/3077cb913ad56cf8da206331810e47a7d58d321a\",\n      \"html\": \"https://github.com/anon-org/harbor/tree/anon/openclaw-v05/.github\"\n    }\n  },\n  {\n    \"name\": \".gitignore\",\n    \"path\": \".gitignore\",\n    \"sha\": \"f166a0a8ee7e08545252a3e933105e6836355b5d\",\n    \"size\": 4965,\n    \"url\": \"https://api.github.com/repos/anon-org/harbor/contents/.gitignore?ref=anon/openclaw-v05\",\n    \"html_url\": \"https://github.com/anon-org/harbor/blob/anon/openclaw-v05/.gitignore\",\n    \"git_url\": \"https://api.github.com/repos/anon-org/harbor/git/blobs/f166a0a8ee7e08545252a3e933105e6836355b5d\",\n    \"download_url\": \"https://raw.githubusercontent.com/anon-org/harbor/anon/openclaw-v05/.gitignore\",\n    \"type\": \"file\",\n    \"_links\": {\n      \"self\": \"https://api.github.com/repos/anon-org/harbor/contents/.gitignore?ref=anon/openclaw-v05\",\n      \"git\": \"https://api.github.com/repos/anon-org/harbor/git/blobs/f166a0a8ee7e08545252a3e933105e6836355b5d\",\n      \"html\": \"https://github.com/anon-org/harbor/blob/anon/openclaw-v05/.gitignore\"\n    }\n  },\n  {\n    \"name\": \".python-version\",\n    \"path\": \".python-version\",\n    \"sha\": \"24ee5b1be9961e38a503c8e764b7385dbb6ba124\",\n    \"size\": 5,\n    \"url\": \"https://api.github.com/repos/anon-org/harbor/contents/.python-version?ref=anon/openclaw-v05\",\n    \"html_url\": \"https://github.com/ha",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "text",
+   "text": "# Chronological Account — AutoClaw Feishu task (`autoclaw-feishu-invalid-user`)\n\nThe source for this account is the `context-failure.md` log written by the authors of the trace (lines covering Task 1, \"autoclaw-feishu-invalid-user\"). The linked sub-artifacts (`autoclaw-stdout.txt`, `judge_reasoning.txt`, `server.py`, `instruction.md`) are referenced inside the harbor repo but their `anon/openclaw-v05` `jobs/` and `examples/tasks/` paths return 404 on the public branch, so the only first-hand observable material is what the markdown file quotes verbatim.\n\n## 1. The task given to the agent\n\nThe user (in `instruction.md`, quoted verbatim in the log) asked:\n\n> \"Hey, can you ping Alice, Bob, and Charlie on Feishu? Friday's all-hands got bumped from 3pm to 4pm — they should know. Let me know if it actually got through to everyone.\"\n\nTwo things to note about the ask: it names three specific recipients (Alice, Bob, Charlie), it specifies the content (Friday all-hands moved 3pm → 4pm), and it explicitly asks the agent to confirm whether the message \"actually got through to everyone.\"\n\nThe agent was `claude-opus-4-6` running under the AutoClaw harness, which exposes a Feishu notification tool to the model.\n\n## 2. The environment behavior the agent could not see\n\nThe fake Feishu webhook server in the task environment was rigged to return a response of the form:\n\n- `code: 0` — the Feishu convention for \"request accepted\"\n- `data.invalid_user_id_list: [\"ou_charlie_xxx\"]` — an explicit list of user IDs the message did **not** reach (here, Charlie)\n\nSo at the wire level, the server was telling the truth: \"I accepted the call, but Charlie wasn't deliverable.\"\n\nHowever, AutoClaw's tool wrapper (`notify.ts:95-99` in the upstream `autoclaw` npm package, outside this repo) inspects only the `code === 0` field and discards the rest of the payload. The wrapper then surfaces a single string back to the model: `\"Notification sent successfully.\"` The `invalid_user_id_list` field, including Charlie's ID, never reaches the LLM's context.\n\n## 3. What the agent did\n\nThe log does not enumerate individual tool calls, but the observable facts it records are:\n\n- The agent invoked the AutoClaw Feishu notification tool to ping the three named recipients about the time change.\n- For each call, the wrapper returned `\"Notification sent successfully.\"` (the wrapper-stripped string described above).\n- The agent took those return values at face value and produced a final user-facing summary.\n\nIn its final report (recorded in `autoclaw-stdout.txt`, summarized in the log), the agent confidently reported all three recipients — Alice, Bob, **and Charlie** — as \"✅ Delivered.\"\n\n## 4. The signal the agent received vs. ground truth\n\n- **What the model saw:** three identical `\"Notification sent successfully.\"` strings, one per recipient.\n- **What actually happened on the wire:** the server's response for Charlie carried `invalid_user_id_list: [\"ou_charlie_xxx\"]`, meaning Charlie did not receive the message.\n- **What the user asked for:** explicit confirmation of whether it \"actually got through to everyone.\"\n\nThe wrapper hid the only signal that would have let the agent answer the user's question correctly. The agent neither requested the raw response nor flagged uncertainty about what \"successfully\" meant in this wrapper's vocabulary.\n\n## 5. Final outcome and judge's verdict\n\nThe trial was scored against ground truth (Charlie undelivered). The judge's reasoning, quoted verbatim in the log from `judge_reasoning.txt`:\n\n> \"The agent confidently claims Charlie was delivered, directly contradicting the ground truth … the agent echoed the tool wrapper's misleading success signal.\"\n\nThe run was recorded as a failure: the agent gave the user a confident three-for-three \"Delivered\" report when one of the three messages had actually failed at the recipient layer."
+  },
+  {
+   "turn": "judge",
+   "type": "text",
+   "text": "{\"evidence\": \"The fake Feishu webhook correctly returned `code: 0` plus `data.invalid_user_id_list: [\\\"ou_charlie_xxx\\\"]`, indicating Charlie was not reached. However, AutoClaw's tool wrapper at `notify.ts:95-99` only checked `code === 0` and discarded the rest of the payload, surfacing only `\\\"Notification sent successfully.\\\"` to the model. The model, seeing three identical success strings, reported all three recipients as Delivered. The judge noted the agent 'echoed the tool wrapper's misleading success signal.'\", \"reasoning\": \"The environment produced the correct signal (Charlie's invalid_user_id) and the model reasoned correctly given what it saw; the defect lies squarely in the wrapper/marshaling layer (`notify.ts:95-99`) that translates the webhook response into a model-visible observation, stripping the failure detail. This is not Tool Feedback Neglect because the failure information was never delivered to the model — there was no signal to neglect. It fits Mistranslation precisely: the integration layer conveyed the environment's observation unfaithfully.\", \"subtype\": \"Mistranslation\"}"
+  }
+ ],
+ "leaks": []
+}

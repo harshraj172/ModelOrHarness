@@ -1,0 +1,366 @@
+{
+ "id": "E32",
+ "gold": {
+  "edge": "model — tool",
+  "fault_side": "model",
+  "failure_mode": "Tool Recovery Failure",
+  "vulnerability": "none"
+ },
+ "pred": {
+  "edge": "model — tool",
+  "fault_side": "model",
+  "failure_mode": "Tool Recovery Failure",
+  "category": "model — tool (fault: model)"
+ },
+ "evidence": "MiniMax-M2.7 completed hold_inventory and build_checkout_from_hold, then called convert_datetime with timestamp 1710000300. The convert_datetime call returned an explicit transient error, {\"error\":\"Internal Server Error\"}, after which the agent did not retry the same tool and instead continued to downstream recommendation and notification tools. The run failed because convert_datetime was called only once, never produced the required formatted expiry time, and the required expiry-conversion step remained incomplete.",
+ "reasoning": "I checked the relevant disambiguation notes and the previous classification still holds. Notes 6 and 7 do not move this to env (external) — model Service Failure because the benchmarked failure was transient and recoverable by retry; the external/tool error was not the terminal non-recoverable blocker. Note 8 does not apply because the user task and expected workflow did require the reservation expiry time, so this is not an instruction-grader mismatch. Owner — model labels such as Instruction-Following or Satisficing are less precise because the first root-cause error occurred at the model–tool boundary: the model failed to recover from an explicit tool perturbation. Tool Feedback Neglect is close, but Tool Recovery Failure is the more specific subtype because the observed failure is exactly failure to handle a transient tool anomaly by retrying or otherwise recovering.",
+ "confidence": "high",
+ "changed": false,
+ "pre_reflection": {
+  "category": "model — tool (fault: model)",
+  "failure_mode": "Tool Recovery Failure"
+ },
+ "dossier": "## Chronological account of the MiniMax-M2.7 failure\n\nThe referenced case is ToolMaze Appendix E / Figure 7: `C1_task_089` under perturbation mode `P1`, an **Explicit-Transient** failure. The victim tool is `convert_datetime`.\n\n### 1. Task given to the agent\n\nThe user asked the agent to complete a shopping workflow for `user_123`:\n\n> “Hi, for user_123, please reserve 1 black Sony XM5 for me using product_id p_sony_xm5_blk. The title is Untitled and the data is test. After you place the hold, please prepare the checkout from that reservation and let me know exactly when the reservation expires. Then suggest some popular alternatives in the same category, and send me an in-app notification with all the details.”\n\nThe intended workflow was a linear C1 pipeline:\n\n1. `hold_inventory`\n2. `build_checkout_from_hold`\n3. `convert_datetime`\n4. `get_recommendations_popularity`\n5. `create_document_and_alert_from_data`\n\nThe `convert_datetime` step was needed to convert the reservation expiry timestamp into a human-readable expiry time.\n\n### 2. Expected perturbation behavior\n\nIn this P1 case, the first call to the victim tool `convert_datetime` was deliberately perturbed to return an explicit transient error:\n\n```json\n{\"error\": \"Internal Server Error\"}\n```\n\nThe expected recovery behavior was to retry `convert_datetime` with the same timestamp. The source task data specifies that the successful retry would return:\n\n```json\n{\n  \"original_timestamp\": 1710000300,\n  \"formatted_time\": \"2024-03-09 16:05\"\n}\n```\n\nOnly after obtaining that successful conversion was the agent expected to continue and complete the rest of the workflow.\n\n### 3. MiniMax-M2.7 execution trace\n\nAccording to the Figure 7 failure panel for **MiniMax-M2.7**, the agent began by following the required tool sequence.\n\n#### Step 1: It called `hold_inventory`\n\nThe agent first called `hold_inventory` to reserve the requested product:\n\n- `product_id`: `p_sony_xm5_blk`\n- `user_id`: `user_123`\n- `quantity`: `1`\n\nThe source task data shows this step succeeded and produced a reservation including:\n\n- `reservation_id`: `RESV-14729548`\n- `expires_in`: `300`\n- `expiry_time`: `1710000300`\n- `total_price`: `399.0`\n\n#### Step 2: It called `build_checkout_from_hold`\n\nNext, the agent called `build_checkout_from_hold` using the reservation data from the hold. This step also succeeded. The expected output included:\n\n```json\n{\n  \"reservation_id\": \"RESV-14729548\",\n  \"product_id\": \"p_sony_xm5_blk\",\n  \"quantity\": 1\n}\n```\n\n#### Step 3: It called `convert_datetime`\n\nThe agent then called the victim tool, `convert_datetime`, with the reservation expiry timestamp:\n\n```json\n{\n  \"timestamp\": 1710000300\n}\n```\n\nBecause this was the perturbed P1 case, the tool returned the explicit transient error:\n\n```json\n{\n  \"error\": \"Internal Server Error\"\n}\n```\n\nThe task metadata also records this as a `500 InternalServerError`.\n\n#### Step 4: It did not retry `convert_datetime`\n\nThe key observable divergence in the failure trace is that MiniMax-M2.7 called `convert_datetime` only once. After receiving the transient error, it did not make the expected retry call with the same timestamp.\n\nThe figure’s evaluation message states:\n\n> `P1 failed: no retry on 'convert_datetime' (called 1 time(s), need >=2); 'convert_datetime' never succeeded after retries; missing required tools: ['convert_datetime']`\n\n#### Step 5: It continued to downstream tools\n\nInstead of retrying `convert_datetime`, the MiniMax-M2.7 trace shows the agent proceeded to later workflow steps:\n\n- `get_recommendations_popularity`\n- `create_document_and_alert_from_data`\n\nThe recommendations step was supposed to suggest popular alternatives in the same category. The expected successful output included two alternatives:\n\n- Sony WH-1000XM5 Headphones, Silver — `p_sony_xm5_slv`\n- Apple AirPods Pro 2 — `p_apple_airpods`\n\nThe final document/notification tool was also part of the intended pipeline, using:\n\n- `title`: `Untitled`\n- `data`: `test`\n- `user_id`: `user_123`\n- `priority`: `medium`\n- `channel`: `app`\n\nHowever, because `convert_datetime` had not succeeded, the workflow was missing the successful expiry-time conversion required by the user’s request.\n\n### 4. Final outcome\n\nThe run was marked as **FAIL**.\n\nThe observable failure condition reported by the evaluator was:\n\n- `convert_datetime` was called only once.\n- The single call returned the transient `Internal Server Error`.\n- The agent did not retry the tool.\n- Therefore `convert_datetime` never produced the required successful output.\n- The downstream pipeline was considered incomplete because the reservation expiry time was never successfully converted.\n\nThe paper caption summarizes this case as follows: the victim tool `convert_datetime` returns an explicit error on the first call; the successful model retries and recovers; the failing model calls the tool only once and abandons it, leaving the downstream pipeline incomplete.\n\n## Sources\n\n- [When Tools Fail: Benchmarking Dynamic Replanning and Anomaly Recovery in LLM Agents — arXiv](https://arxiv.org/abs/2606.05806)\n- [When Tools Fail: Benchmarking Dynamic Replanning and Anomaly Recovery in LLM Agents — PDF](https://arxiv.org/pdf/2606.05806)\n- [ToolMaze GitHub repository](https://github.com/Zhudongsheng75/ToolMaze)\n- [ToolMaze Hugging Face dataset](https://huggingface.co/datasets/dongsheng/ToolMaze)\n- [C1_task_089_P1 JSON on Hugging Face](https://huggingface.co/datasets/dongsheng/ToolMaze/resolve/main/perturbed_tasks/c1/C1_task_089_P1.json)",
+ "trajectory": [
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebSearch",
+   "input": "{'query': 'ToolMaze App. E Fig. 7 C1_task_089 C1/P1 explicit-transient victim convert_datetime MiniMax-M2.7', 'allowed_domains': [], 'blocked_domains': []}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Web search results for query: \"ToolMaze App. E Fig. 7 C1_task_089 C1/P1 explicit-transient victim convert_datetime MiniMax-M2.7\"\n\nSearch results for **“ToolMaze App. E Fig. 7 C1_task_089 C1/P1 explicit-transient victim convert_datetime MiniMax-M2.7”** found a strong match in a recent paper:\n\n**When Tools Fail: Benchmarking Dynamic Replanning and Anomaly Recovery in LLM Agents** — available via ResearchGate and another mirrored PDF page. The result includes **Figure 7: C1 P1 — Explicit-Transient (C1_task_089)**, where the victim tool `convert_datetime` returns an explicit transient error (`Internal Server Error`) on the first call. The successful model retries and recovers, while the failing model **MiniMax-M2.7** calls `convert_datetime` only once, does not retry, and fails the task. ([researchgate.net](https://www.researchgate.net/publication/406039907_When_Tools_Fail_Benchmarking_Dynamic_Replanning_and_Anomaly_Recovery_in_LLM_Agents/download?utm_source=openai))\n\nRelevant excerpted details from the search result:\n\n- **Case:** `C1_task_089`\n- **Perturbation:** `P1 — Explicit-Transient`\n- **Victim tool:** `convert_datetime`\n- **Perturbed output:** `{\"error\": \"Internal Server Error\"}`\n- **Failure model:** `MiniMax-M2.7`\n- **Failure reason:** no retry on `convert_datetime`; it was called only once and never succeeded after retries; downstream pipeline incomplete. ([researchgate.net](https://www.researchgate.net/publication/406039907_When_Tools_Fail_Benchmarking_Dynamic_Replanning_and_Anomaly_Recovery_in_LLM_Agents/download?utm_source=openai))\n\n\nREMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebFetch",
+   "input": "{'url': 'https://www.researchgate.net/publication/406039907_When_Tools_Fail_Benchmarking_Dynamic_Replanning_and_Anomaly_Recovery_in_LLM_Agents/download', 'prompt': 'Extract all available text around Appendix E, Figure 7, especially task C1_task_089, C1/P1 explicit-transient, victim tool convert_datetime, and MiniMax-M2.7. Include the task prompt, chronological tool calls, outputs/errors, and final outcome if present.'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "The server returned HTTP 403 Forbidden.\n\nThe response body was not retrieved. If this URL requires authentication, use an authenticated tool (e.g. `gh` for GitHub, or an MCP-provided fetch tool) instead of WebFetch.",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebSearch",
+   "input": "{'query': '\"When Tools Fail\" \"C1_task_089\"', 'allowed_domains': [], 'blocked_domains': []}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Web search results for query: \"\"When Tools Fail\" \"C1_task_089\"\"\n\nFound a relevant result for the query **`\"When Tools Fail\" \"C1_task_089\"`**:\n\n**When Tools Fail: Benchmarking Dynamic Replanning and Anomaly Recovery in LLM Agents**  \nA June 2026 preprint introducing **ToolMaze**, a benchmark for evaluating LLM agents’ ability to recover from tool failures. The paper includes **C1_task_089** as a case study across perturbation modes P1–P4. ([researchgate.net](https://www.researchgate.net/publication/406039907_When_Tools_Fail_Benchmarking_Dynamic_Replanning_and_Anomaly_Recovery_in_LLM_Agents/download?utm_source=openai))\n\nKey match:\n\n- **Case:** `C1_task_089`\n- **Complexity:** `C1` — linear pipeline\n- **Victim tool:** `convert_datetime`\n- **Task theme:** Reserve a black Sony XM5, build checkout from the reservation, convert the reservation expiration time, get popularity recommendations, and create a document/alert.\n- The paper shows examples for:\n  - **P1 Explicit-Transient:** `convert_datetime` returns an internal server error once; successful agents retry.\n  - **P2 Explicit-Permanent:** `convert_datetime` returns quota exhausted; successful agents stop gracefully.\n  - **P3 Implicit-Transient:** `convert_datetime` returns corrupted/empty time fields; successful agents detect and retry.\n  - **P4 Implicit-Permanent:** corrupted output persists; successful agents halt rather than continue downstream.\n\n\nREMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebSearch",
+   "input": "{'query': '\"When Tools Fail: Benchmarking Dynamic Replanning\" PDF', 'allowed_domains': [], 'blocked_domains': []}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Web search results for query: \"\"When Tools Fail: Benchmarking Dynamic Replanning\" PDF\"\n\nFound the PDF/paper:\n\n**When Tools Fail: Benchmarking Dynamic Replanning and Anomaly Recovery in LLM Agents**  \n- **arXiv:** 2606.05806  \n- **Authors:** Dongsheng Zhu, Xuchen Ma, Yucheng Shen, Xiang Li, Yukun Zhao, Shuaiqiang Wang, Lingyong Yan, Dawei Yin  \n- **Published:** June 4, 2026  \n- **PDF available via:** arXiv / ResearchGate / Hugging Face Papers  \n- **Code/data:** GitHub repo listed as `Zhudongsheng75/ToolMaze`\n\nBest source: the arXiv page for the paper. ([arxiv.org](https://arxiv.org/abs/2606.05806?utm_source=openai))\n\nOther relevant PDF/result pages include ResearchGate and Hugging Face Papers. ([researchgate.net](https://www.researchgate.net/publication/406039907_When_Tools_Fail_Benchmarking_Dynamic_Replanning_and_Anomaly_Recovery_in_LLM_Agents/download?utm_source=openai))\n\n\nREMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebFetch",
+   "input": "{'url': 'https://arxiv.org/abs/2606.05806', 'prompt': 'Extract the abstract and any references/links to PDF or source code/data. Also identify where Appendix E Figure 7 appears and summarize available text mentioning C1_task_089, convert_datetime, MiniMax-M2.7.'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "### Abstract (paraphrased)\nThe paper says current \"Tool-Integrated Reasoning (TIR)\" benchmarks mostly test ideal tool-use paths and miss real-world tool failures. It introduces \"ToolMaze\", a benchmark for dynamic path discovery and recovery from errors in LLM agents. ToolMaze varies both graph/topology difficulty and tool-failure types: explicit vs. implicit and transient vs. permanent. The reported results show that failures reduce performance broadly, with implicit semantic failures causing the largest drops. The authors attribute this to agents over-trusting bad tool outputs; recovery rate falls by about 37%, and complex task graphs can lead to unproductive trial-and-error. They also argue that fault tolerance improves with model scale much more slowly than ordinary task execution, making replanning a separate bottleneck.\n\n### PDF / source / code-data links found\n- PDF: `https://arxiv.org/pdf/2606.05806`\n- Experimental HTML: `https://arxiv.org/html/2606.05806v1`\n- TeX source: `https://arxiv.org/src/2606.05806`\n- Code/data: `https://github.com/Zhudongsheng75/ToolMaze`\n- DOI: `https://doi.org/10.48550/arXiv.2606.05806`\n- arXiv page: `https://arxiv.org/abs/2606.05806`\n\n### Citation/reference-related links shown\n- NASA ADS: `https://ui.adsabs.harvard.edu/abs/arXiv:2606.05806`\n- Google Scholar: `https://scholar.google.com/scholar_lookup?arxiv_id=2606.05806`\n- Semantic Scholar: `https://api.semanticscholar.org/arXiv:2606.05806`\n\n### Appendix E / Figure 7 / specific terms\nBased only on the provided page text:\n- Appendix E Figure 7 is not shown or described.\n- No available text mentions `C1_task_089`.\n- No available text mentions `convert_datetime`.\n- No available text mentions `MiniMax-M2.7`.",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebFetch",
+   "input": "{'url': 'https://arxiv.org/html/2606.05806v1', 'prompt': 'Find Appendix E and Figure 7. Extract the complete caption and all text in or around Figure 7, especially C1_task_089, C1/P1 explicit-transient, victim convert_datetime, MiniMax-M2.7. Include any visible task prompt, tool call sequence, tool outputs, feedback/errors, and final outcome.'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "I can’t extract Appendix E / Figure 7 from the provided page content because it is not included in the supplied excerpt.\n\nWhat is visible:\n\n- Appendix E appears only in the table of contents as: “E Case Studies”\n- The body content stops during Appendix D / Table 22 and is marked as truncated.\n- No Figure 7 caption or case-study text is present in the provided content.\n- The requested items are not visible in the supplied text:\n  - C1_task_089\n  - C1/P1 explicit-transient\n  - victim convert_datetime\n  - MiniMax-M2.7\n  - task prompt\n  - tool call sequence\n  - tool outputs\n  - feedback/errors\n  - final outcome\n\nSo, based only on the content above, the complete Figure 7 caption and surrounding Appendix E case-study details cannot be determined.",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nimport urllib.request, tarfile, io, os\\nurl='https://arxiv.org/src/2606.05806'\\ndata=urllib.request.urlopen(url, timeout=30).read()\\nprint(len(data), data[:20])\\nopen('/tmp/toolmaze_src','wb').write(data)\\nPY\", 'description': 'Download arXiv source archive', 'timeout': 120000, 'run_in_background': False, 'dangerouslyDisableSandbox': False}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "2431801 b'\\x1f\\x8b\\x08\\x00\\x9c\\x1a\"j\\x00\\x03\\xec[\\xfdr\\x1b7\\x92\\xcf\\xdfz'",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'mkdir -p /tmp/toolmaze_src && tar -xzf /tmp/toolmaze_src -C /tmp/toolmaze_src && ls /tmp/toolmaze_src', 'description': 'Extract arXiv source archive', 'timeout': 120000, 'run_in_background': False, 'dangerouslyDisableSandbox': False}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Exit code 1\nmkdir: cannot create directory ‘/tmp/toolmaze_src’: File exists",
+   "is_error": true
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'mkdir -p /tmp/toolmaze_tex && tar -xzf /tmp/toolmaze_src -C /tmp/toolmaze_tex && ls /tmp/toolmaze_tex', 'description': 'Extract arXiv source files', 'timeout': 120000, 'run_in_background': False, 'dangerouslyDisableSandbox': False}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "00README.json\nacl.sty\nacl_latex.tex\nacl_natbib.bst\ncustom.bib\nfigs\nsections\ntables",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Grep",
+   "input": "{'pattern': 'C1_task_089|MiniMax|convert_datetime|Figure 7|fig:|Explicit-Transient', 'path': '/tmp/toolmaze_tex', 'glob': '**/*', 'output_mode': 'content', '-B': 3, '-A': 8, '-C': 0, 'context': 0, '-n': True, '-i': False, '-o': False, 'type': '', 'head_limit': 200, 'offset': 0, 'multiline': False}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "/tmp/toolmaze_tex/custom.bib:312:  author = {{MiniMax}},\n/tmp/toolmaze_tex/custom.bib:313:  title = {MiniMax M2.7: Early Echoes of Self-Evolution},\n/tmp/toolmaze_tex/acl_latex.tex:180:  \\label{fig:example}\n/tmp/toolmaze_tex/tables/main_results.tex:26:MiniMax-M2.7 (w/o hint) & 56.50 & 36.50 & 22.75 & 9.50 & 7.25 & 19.00 & 48.61 & 24.16 & 11.38 & 9.22 & 23.34 & 56.59 & 72.65 & 83.14 & 86.66 & 74.76 & 25.03 \\\\\n/tmp/toolmaze_tex/tables/main_results.tex:27:MiniMax-M2.7 (w/ hint) & 55.50 & 44.25 & 25.25 & 9.25 & 9.00 & 21.94 & 57.66 & 27.75 & 9.86 & 12.05 & 26.83 & 50.40 & 70.71 & 85.43 & 85.34 & 72.97 & 27.50\\rlap{$^{{\\color{deltagreen}\\scriptscriptstyle\\uparrow}}$} \\\\\n/tmp/toolmaze_tex/sections/4.experiment.tex:9:(1) Open-weight: GLM-5.1~\\cite{glm5team2026glm5vibecodingagentic}, Deepseek-V4-Pro~\\cite{deepseekai2026deepseekv4}, MiniMax-M2.7~\\cite{minimaxm27}, Qwen3.5-35B-A3B~\\cite{qwen3.5}, Qwen3.5-397B-A17B~\\cite{qwen3.5}, Qwen3.6-27B~\\cite{qwen3.6-27b}. (2) Proprietary: GPT-5.5~\\cite{gpt55}, Gemini-3.1-Pro-Preview~\\cite{gemini31}, Claude-Sonnet-4-6~\\cite{claude}.\n/tmp/toolmaze_tex/sections/4.experiment.tex:15:    \\label{fig:plot_line_hint}\n/tmp/toolmaze_tex/sections/4.experiment.tex:58:    \\label{fig:PRR-RC}\n/tmp/toolmaze_tex/sections/4.experiment.tex:65:As illustrated in Figure \\ref{fig:plot_line_hint}, model resilience is strongest at $\\mathcal C2$ rather than $\\mathcal{C}$1: TSR and PRR reach their highest values, while RC reaches its lowest value.\n/tmp/toolmaze_tex/sections/4.experiment.tex:79:    \\label{fig:scaling}\n/tmp/toolmaze_tex/sections/4.experiment.tex:84:Figure~\\ref{fig:PRR-RC} shows a clear inverse relationship between PRR and RC. As perturbation modes shift from easily detectable faults ($\\mathcal P 1$) to deceptive, persistent errors ($\\mathcal P 4$), models exhibit a monotonic decline in recovery success alongside a sharp increase in recovery cost. \n/tmp/toolmaze_tex/sections/4.experiment.tex:91:Figure~\\ref{fig:scaling} plots overall PRR (averaged over",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/tmp/toolmaze_tex/tables/case_study.tex', 'offset': 1, 'limit': 55, 'pages': ''}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "<tool_use_error>Invalid pages parameter: \"\". Use formats like \"1-5\", \"3\", or \"10-20\". Pages are 1-indexed.</tool_use_error>",
+   "is_error": true
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/tmp/toolmaze_tex/tables/case_study.tex', 'offset': 1, 'limit': 55, 'pages': ''}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "<tool_use_error>Invalid pages parameter: \"\". Use formats like \"1-5\", \"3\", or \"10-20\". Pages are 1-indexed.</tool_use_error>",
+   "is_error": true
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/tmp/toolmaze_tex/tables/case_study.tex', 'offset': 0, 'limit': 60, 'pages': ''}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "<tool_use_error>Invalid pages parameter: \"\". Use formats like \"1-5\", \"3\", or \"10-20\". Pages are 1-indexed.</tool_use_error>",
+   "is_error": true
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/tmp/toolmaze_tex/tables/case_study.tex', 'offset': 0, 'limit': 60, 'pages': ''}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "<tool_use_error>Invalid pages parameter: \"\". Use formats like \"1-5\", \"3\", or \"10-20\". Pages are 1-indexed.</tool_use_error>",
+   "is_error": true
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/tmp/toolmaze_tex/tables/case_study.tex', 'offset': 0, 'limit': 60, 'pages': ''}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "<tool_use_error>Invalid pages parameter: \"\". Use formats like \"1-5\", \"3\", or \"10-20\". Pages are 1-indexed.</tool_use_error>",
+   "is_error": true
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/tmp/toolmaze_tex/tables/case_study.tex', 'offset': 0, 'limit': 60, 'pages': ''}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "<tool_use_error>Invalid pages parameter: \"\". Use formats like \"1-5\", \"3\", or \"10-20\". Pages are 1-indexed.</tool_use_error>",
+   "is_error": true
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/tmp/toolmaze_tex/tables/case_study.tex', 'offset': 0, 'limit': 60, 'pages': ''}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "<tool_use_error>Invalid pages parameter: \"\". Use formats like \"1-5\", \"3\", or \"10-20\". Pages are 1-indexed.</tool_use_error>",
+   "is_error": true
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/tmp/toolmaze_tex/tables/case_study.tex', 'offset': 0, 'limit': 60, 'pages': ''}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "<tool_use_error>Invalid pages parameter: \"\". Use formats like \"1-5\", \"3\", or \"10-20\". Pages are 1-indexed.</tool_use_error>",
+   "is_error": true
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/tmp/toolmaze_tex/tables/case_study.tex', 'offset': 0, 'limit': 60, 'pages': ''}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "<tool_use_error>Invalid pages parameter: \"\". Use formats like \"1-5\", \"3\", or \"10-20\". Pages are 1-indexed.</tool_use_error>",
+   "is_error": true
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/tmp/toolmaze_tex/tables/case_study.tex', 'offset': 0, 'limit': 60, 'pages': ''}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "<tool_use_error>Invalid pages parameter: \"\". Use formats like \"1-5\", \"3\", or \"10-20\". Pages are 1-indexed.</tool_use_error>",
+   "is_error": true
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/tmp/toolmaze_tex/tables/case_study.tex', 'offset': 0, 'limit': 60, 'pages': ''}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "<tool_use_error>Invalid pages parameter: \"\". Use formats like \"1-5\", \"3\", or \"10-20\". Pages are 1-indexed.</tool_use_error>",
+   "is_error": true
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/tmp/toolmaze_tex/tables/case_study.tex', 'offset': 0, 'limit': 60, 'pages': '1'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "0\t\n1\t\\renewcommand{\\dbltopfraction}{0.97}\n2\t\\renewcommand{\\dblfloatpagefraction}{0.50}\n3\t\\setcounter{dbltopnumber}{6}\n4\t\\setlength{\\dblfloatsep}{4pt}\n5\t\\setlength{\\dbltextfloatsep}{6pt}\n6\t\n7\t% ── Section intro ──────────────────────────────────────────────────────────────\n8\t\\section{Case Studies}\n9\t\\label{app:case_study}\n10\tTo provide a qualitative understanding of LLM's behavioral patterns, we present 16 representative case studies (Figure \\ref{fig:cs_c1_p1}-\\ref{fig:cs_c4_p4})---one for each combination of\n11\tcomplexity level (\\textbf{$\\mathcal C 1$}--\\textbf{$\\mathcal C 4$}) and perturbation type\n12\t(\\textbf{$\\mathcal P 1$}--\\textbf{$\\mathcal P 4$}).\n13\tEach figure contrasts a \\emph{successful} model with a \\emph{failed} one on the same task\n14\tinstance.\n15\t\n16\tEach figure is laid out as follows.\n17\tThe \\textbf{left column} contains:\n18\t(i)~the natural-language task query;\n19\t(ii)~the full tool-call DAG, with victim node(s) highlighted in red; and\n20\t(iii)~the actual perturbed response returned by the victim tool.\n21\tThe \\textbf{right column} shows two execution traces.\n22\tThe \\textcolor{green!60!black}{green} (\\emph{Success}) panel displays a model that handles\n23\tthe perturbation correctly.\n24\tThe \\textcolor{red!70!black}{red} (\\emph{Failure}) panel shows a model that failed to recover.\n25\t\n26\t\\clearpage\n27\t\n28\t% ── C1 ── (first two figures pinned to bottom of the intro page via stfloats)\n29\t\\begin{figure*}[!b]\n30\t  \\centering\n31\t  \\includegraphics[width=\\linewidth]{figs/case_study/case_study_C1_task_089_P1.pdf}\n32\t  \\caption{%\n33\t    \\textbf{$\\mathcal C 1$\\,$\\mathcal P 1$ --- Explicit-Transient} (\\texttt{C1\\_task\\_089}).\n34\t    The victim tool \\texttt{convert\\_datetime} returns an explicit error on the first call.\n35\t    The successful model retries and recovers; the failing model calls the tool only once\n36\t    and abandons it, leaving the downstream pipeline incomplete.%\n37\t  }\n38\t  \\label{fig:cs_c1_p1}\n39\t\\end{figure*}\n40\t\n41\t\\begin{figure*}[!b]\n42\t  \\cente",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'pdftotext /tmp/toolmaze_tex/figs/case_study/case_study_C1_task_089_P1.pdf - | python3 -c \"import sys; print(sys.stdin.read()[:12000])\"', 'description': 'Extract text from case-study PDF', 'timeout': 120000, 'run_in_background': False, 'dangerouslyDisableSandbox': False}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Case C1\n\nC1_task_089 P1 — Explicit-Transient\n\nHi, for user_123, please reserve 1 black\nSony XM5 for me using product_id\np_sony_xm5_blk. The title is Untitled and\nthe data is test. After you place the hold,\nplease prepare the checkout from that reservation and let me know exactly when the\nreservation ex...\nhold_inventory\nbuild_checkout_\nfrom_hold\nconvert_\ndatetime ×\nget_\nrecommendations_\npopularity\ncreate_document_\nand_alert_\nfrom_data\nPerturbed output: —\nconvert_datetime: {”error”:\n”Internal Server Error”}\n\n✓ Success claude-sonnet-4-6\n\nhold_inventory\n\nbuild_checkout_\nfrom_hold\n\nget_recommendations_\npopularity\n\ncreate_document_\nand_alert_from_data\n\n! P1\nconvert_datetime\n\nretry ✓\nconvert_datetime\n\nPASS All 5 steps completed successfully. Here is a clean summary: — Reservation - Reservation ID: RESV-14729548\n- Product: Sony WH-1000XM5 (Black) — p_sony_xm5_blk - Quantity: 1 - Total Price: $399....\n\n× Failure MiniMax-M2.7\n\nhold_inventory\n\nbuild_checkout_\nfrom_hold\n\n! P1\nconvert_datetime\n\nget_recommendations_\npopularity\n\ncreate_document_\nand_alert_from_data\nFAIL P1 failed: no retry on ’convert_datetime’ (called 1 time(s), need >=2); ’convert_datetime’ never succeeded\nafter retries; missing required tools: [’convert_datetime’]",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebFetch",
+   "input": "{'url': 'https://github.com/Zhudongsheng75/ToolMaze', 'prompt': 'Find repository structure and any data files containing C1_task_089. Summarize likely paths and provide raw links if visible.'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Based only on the provided page:\n\n### Visible repository structure\n\nTop-level visible entries:\n\n- `evaluation/`\n- `toolmaze/`\n- `tools/`\n- `.gitignore`\n- `README.md`\n- `requirements.txt`\n- `run_api_eval.py`\n- `run_batch_api_eval.py`\n\nREADME-declared structure also includes a dataset directory:\n\n- `data/perturbed_tasks/` — \"Task JSONs grouped by complexity (c1..c4)\"\n- `data/tasks/` — generated task JSONs\n- `data/templates/` — DAG templates\n\n### Likely paths for files involving `C1_task_089`\n\nNo file named or containing `C1_task_089` is visible in the page content. However, based on the README examples and layout, likely locations would be:\n\n- `data/perturbed_tasks/c1/`\n  - possible perturbed task IDs such as `C1_task_089_P0`, `C1_task_089_P1`, etc.\n- `data/tasks/`\n  - possible base/generated task JSON for `C1_task_089`\n- `evaluation/results/{model}/{fc|mcp}/c1/`\n  - possible outputs after evaluation:\n    - `inferences/{task_id}_{mode}_inference.json`\n    - `evaluations/{task_id}_{mode}_eval.json`\n\n### Raw links\n\nNo raw file links for `C1_task_089` or dataset JSON files are visible in the provided content.\n\nVisible relevant links:\n\n- Repository: `https://github.com/Zhudongsheng75/ToolMaze`\n- Dataset: `https://huggingface.co/datasets/dongsheng/ToolMaze`\n- README-mentioned paper: `https://arxiv.org/abs/2606.05806`",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebFetch",
+   "input": "{'url': 'https://huggingface.co/datasets/dongsheng/ToolMaze', 'prompt': 'Find files/splits and any entries or paths for C1_task_089, especially P1. Provide dataset file names and raw URLs if possible.'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "From the provided page, I can confirm only:\n\n- Dataset repo: `dongsheng/ToolMaze`\n- Config/subset: `default`\n- Split: `train`\n- Size: `1K<n<10K`\n- Total file size: `119 MB`\n- Dataset Viewer: broken for `default/train` due to a schema-casting error in nested tool-call records.\n- The page content does **not** show the actual file list, so I cannot directly identify the exact filename/path containing `C1_task_089` or `P1` from the provided HTML alone.\n\nRaw file URLs on Hugging Face usually have this form:\n\n```text\nhttps://huggingface.co/datasets/dongsheng/ToolMaze/resolve/main/<PATH>\n```\n\nFor example, if a file path were `data/train.jsonl`, the raw URL would be:\n\n```text\nhttps://huggingface.co/datasets/dongsheng/ToolMaze/resolve/main/data/train.jsonl\n```\n\nTo find files/entries for `C1_task_089`, especially perturbation `P1`, use the Hub API or `huggingface_hub`.\n\n```python\nfrom huggingface_hub import list_repo_files, hf_hub_download\nimport json\nfrom pathlib import Path\n\nrepo_id = \"dongsheng/ToolMaze\"\n\n# List all files in the dataset repo\nfiles = list_repo_files(repo_id, repo_type=\"dataset\")\nfor f in files:\n    print(f, \"=>\", f\"https://huggingface.co/datasets/{repo_id}/resolve/main/{f}\")\n```\n\nThen search downloaded JSON/JSONL files:\n\n```python\nfrom huggingface_hub import hf_hub_download\nimport json\n\ntarget_task = \"C1_task_089\"\ntarget_perturbation = \"P1\"\n\nfor file in files:\n    if not file.endswith((\".json\", \".jsonl\")):\n        continue\n\n    path = hf_hub_download(repo_id, filename=file, repo_type=\"dataset\")\n    print(\"Searching:\", file)\n\n    with open(path, \"r\", encoding=\"utf-8\") as f:\n        if file.endswith(\".jsonl\"):\n            for i, line in enumerate(f, 1):\n                try:\n                    obj = json.loads(line)\n                except Exception:\n                    continue\n\n                text = json.dumps(obj, ensure_ascii=False)\n                if target_task in text and target_perturbation in text:\n                    print(\"MATCH\")\n                 ",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebFetch",
+   "input": "{'url': 'https://huggingface.co/api/datasets/dongsheng/ToolMaze/tree/main?recursive=true', 'prompt': 'List all JSON/JSONL/parquet files in this dataset repository, especially paths likely containing C1_task_089 or c1 perturbations.'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "From the provided repository listing, the relevant data files shown are **JSON** files. I did **not** see any `.jsonl` or `.parquet` files in the visible content.\n\n### Main JSON file patterns shown\n\n```text\nperturbed_tasks/c1/C1_task_001_P0.json\nperturbed_tasks/c1/C1_task_001_P1.json\n...\nperturbed_tasks/c1/C1_task_100_P4.json\n```\n\nSo the C1 perturbation files follow this pattern:\n\n```text\nperturbed_tasks/c1/C1_task_{TASK_ID}_P{PERTURBATION}.json\n```\n\nWhere:\n\n- `TASK_ID` appears to run from `001` through `100`\n- `PERTURBATION` appears to run from `0` through `4`\n\nGlob pattern:\n\n```bash\nperturbed_tasks/c1/C1_task_*_P*.json\n```\n\n### Files specifically containing `C1_task_089`\n\nThe listing includes these exact files:\n\n```text\nperturbed_tasks/c1/C1_task_089_P0.json\nperturbed_tasks/c1/C1_task_089_P1.json\nperturbed_tasks/c1/C1_task_089_P2.json\nperturbed_tasks/c1/C1_task_089_P3.json\nperturbed_tasks/c1/C1_task_089_P4.json\n```\n\nWith sizes shown:\n\n```text\nperturbed_tasks/c1/C1_task_089_P0.json  size: 10236\nperturbed_tasks/c1/C1_task_089_P1.json  size: 10959\nperturbed_tasks/c1/C1_task_089_P2.json  size: 10313\nperturbed_tasks/c1/C1_task_089_P3.json  size: 11025\nperturbed_tasks/c1/C1_task_089_P4.json  size: 10380\n```\n\n### Other visible JSON paths\n\nThe listing also shows many C2 perturbation JSON files, e.g.:\n\n```text\nperturbed_tasks/c2/C2_task_001_P0.json\nperturbed_tasks/c2/C2_task_001_P1.json\n...\nperturbed_tasks/c2/C2_task_056_P4.json\n```\n\nThe content is truncated while listing C2 files, so additional files may exist beyond what is visible.\n\n### Useful commands\n\nTo list all JSON/JSONL/parquet files locally:\n\n```bash\nfind . -type f \\( -name \"*.json\" -o -name \"*.jsonl\" -o -name \"*.parquet\" \\)\n```\n\nTo list only C1 perturbation JSON files:\n\n```bash\nfind perturbed_tasks/c1 -type f -name \"C1_task_*_P*.json\"\n```\n\nTo find `C1_task_089` files:\n\n```bash\nfind . -type f -name \"*C1_task_089*\"\n```\n\nOr in Python:\n\n```python\nfrom pathlib import Path\n\nfiles = list(Path(\"perturbed_tasks/c1\").glob",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebFetch",
+   "input": "{'url': 'https://huggingface.co/datasets/dongsheng/ToolMaze/resolve/main/perturbed_tasks/c1/C1_task_089_P1.json', 'prompt': 'Extract the full JSON fields relevant to task prompt, tool DAG, victim/perturbed tool convert_datetime, perturbed output, expected tools, and any evaluation metadata. Include exact values and structure where possible.'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "```json\n{\n  \"task\": {\n    \"task_id\": \"C1_task_089\",\n    \"template_id\": \"C1_template_089\",\n    \"complexity\": \"C1\",\n    \"task_description\": \"Please reserve 1 black Sony XM5 for me, then prepare the checkout from that hold and tell me when the reservation expires. After that, suggest some popular alternatives in the same category, and send me an in-app notification with the details.\",\n    \"domains\": [\n      \"Shopping\",\n      \"General\"\n    ]\n  },\n  \"user_prompt\": {\n    \"query\": \"Hi, for user_123, please reserve 1 black Sony XM5 for me using product_id p_sony_xm5_blk. The title is Untitled and the data is test. After you place the hold, please prepare the checkout from that reservation and let me know exactly when the reservation expires. Then suggest some popular alternatives in the same category, and send me an in-app notification with all the details.\",\n    \"data\": \"test\",\n    \"product_id\": \"p_sony_xm5_blk\",\n    \"quantity\": 1,\n    \"title\": \"Untitled\",\n    \"user_id\": \"user_123\"\n  },\n  \"tool_dag\": [\n    {\n      \"step\": 1,\n      \"tool_name\": \"hold_inventory\",\n      \"depends_on\": [],\n      \"arguments\": {\n        \"product_id\": \"p_sony_xm5_blk\",\n        \"user_id\": \"user_123\",\n        \"quantity\": 1\n      },\n      \"status\": \"success\"\n    },\n    {\n      \"step\": 2,\n      \"tool_name\": \"build_checkout_from_hold\",\n      \"depends_on\": [\n        \"hold_inventory\"\n      ],\n      \"arguments\": {\n        \"hold_data\": {\n          \"reservation_id\": \"RESV-14729548\",\n          \"expires_in\": 300,\n          \"product_id\": \"p_sony_xm5_blk\",\n          \"quantity\": 1,\n          \"total_price\": 399.0,\n          \"expiry_time\": 1710000300,\n          \"reservation_details\": {\n            \"product_id\": \"p_sony_xm5_blk\",\n            \"quantity\": 1,\n            \"total_price\": 399.0\n          }\n        },\n        \"quantity\": 1\n      },\n      \"status\": \"success\"\n    },\n    {\n      \"step\": 3,\n      \"tool_name\": \"convert_datetime\",\n      \"depends_on\": [\n        \"hold_inventory\"\n      ],\n      \"arguments\": {\n    ",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "text",
+   "text": "## Chronological account of the MiniMax-M2.7 failure\n\nThe referenced case is ToolMaze Appendix E / Figure 7: `C1_task_089` under perturbation mode `P1`, an **Explicit-Transient** failure. The victim tool is `convert_datetime`.\n\n### 1. Task given to the agent\n\nThe user asked the agent to complete a shopping workflow for `user_123`:\n\n> “Hi, for user_123, please reserve 1 black Sony XM5 for me using product_id p_sony_xm5_blk. The title is Untitled and the data is test. After you place the hold, please prepare the checkout from that reservation and let me know exactly when the reservation expires. Then suggest some popular alternatives in the same category, and send me an in-app notification with all the details.”\n\nThe intended workflow was a linear C1 pipeline:\n\n1. `hold_inventory`\n2. `build_checkout_from_hold`\n3. `convert_datetime`\n4. `get_recommendations_popularity`\n5. `create_document_and_alert_from_data`\n\nThe `convert_datetime` step was needed to convert the reservation expiry timestamp into a human-readable expiry time.\n\n### 2. Expected perturbation behavior\n\nIn this P1 case, the first call to the victim tool `convert_datetime` was deliberately perturbed to return an explicit transient error:\n\n```json\n{\"error\": \"Internal Server Error\"}\n```\n\nThe expected recovery behavior was to retry `convert_datetime` with the same timestamp. The source task data specifies that the successful retry would return:\n\n```json\n{\n  \"original_timestamp\": 1710000300,\n  \"formatted_time\": \"2024-03-09 16:05\"\n}\n```\n\nOnly after obtaining that successful conversion was the agent expected to continue and complete the rest of the workflow.\n\n### 3. MiniMax-M2.7 execution trace\n\nAccording to the Figure 7 failure panel for **MiniMax-M2.7**, the agent began by following the required tool sequence.\n\n#### Step 1: It called `hold_inventory`\n\nThe agent first called `hold_inventory` to reserve the requested product:\n\n- `product_id`: `p_sony_xm5_blk`\n- `user_id`: `user_123`\n- `quantity`: `1`\n\nThe source task data shows this step succeeded and produced a reservation including:\n\n- `reservation_id`: `RESV-14729548`\n- `expires_in`: `300`\n- `expiry_time`: `1710000300`\n- `total_price`: `399.0`\n\n#### Step 2: It called `build_checkout_from_hold`\n\nNext, the agent called `build_checkout_from_hold` using the reservation data from the hold. This step also succeeded. The expected output included:\n\n```json\n{\n  \"reservation_id\": \"RESV-14729548\",\n  \"product_id\": \"p_sony_xm5_blk\",\n  \"quantity\": 1\n}\n```\n\n#### Step 3: It called `convert_datetime`\n\nThe agent then called the victim tool, `convert_datetime`, with the reservation expiry timestamp:\n\n```json\n{\n  \"timestamp\": 1710000300\n}\n```\n\nBecause this was the perturbed P1 case, the tool returned the explicit transient error:\n\n```json\n{\n  \"error\": \"Internal Server Error\"\n}\n```\n\nThe task metadata also records this as a `500 InternalServerError`.\n\n#### Step 4: It did not retry `convert_datetime`\n\nThe key observable divergence in the failure trace is that MiniMax-M2.7 called `convert_datetime` only once. After receiving the transient error, it did not make the expected retry call with the same timestamp.\n\nThe figure’s evaluation message states:\n\n> `P1 failed: no retry on 'convert_datetime' (called 1 time(s), need >=2); 'convert_datetime' never succeeded after retries; missing required tools: ['convert_datetime']`\n\n#### Step 5: It continued to downstream tools\n\nInstead of retrying `convert_datetime`, the MiniMax-M2.7 trace shows the agent proceeded to later workflow steps:\n\n- `get_recommendations_popularity`\n- `create_document_and_alert_from_data`\n\nThe recommendations step was supposed to suggest popular alternatives in the same category. The expected successful output included two alternatives:\n\n- Sony WH-1000XM5 Headphones, Silver — `p_sony_xm5_slv`\n- Apple AirPods Pro 2 — `p_apple_airpods`\n\nThe final document/notification tool was also part of the intended pipeline, using:\n\n- `title`: `Untitled`\n- `data`: `test`\n- `user_id`: `user_123`\n- `"
+  },
+  {
+   "turn": "judge",
+   "type": "text",
+   "text": "{\"evidence\":\"MiniMax-M2.7 successfully called hold_inventory and build_checkout_from_hold, then called convert_datetime with timestamp 1710000300. The tool returned an explicit transient error, {\\\"error\\\":\\\"Internal Server Error\\\"}, but the agent called convert_datetime only once, did not retry it, and continued to get_recommendations_popularity and create_document_and_alert_from_data. The evaluator marked the run failed because convert_datetime never succeeded after retries and the required expiry-time conversion was missing.\",\"reasoning\":\"The first root-cause failure occurs immediately after the perturbed convert_datetime response: the model needed to recover from a detectable transient tool anomaly by retrying the same call, but it did not. This is not an owner–model instruction mismatch because the task and benchmark metadata required the expiry conversion and recovery path; it is not merely the terminal missing-tool symptom. Although the model also neglected explicit feedback, the closest and more specific taxonomy subtype is Tool Recovery Failure because the defining event is failure to dynamically handle an explicit transient tool perturbation.\",\"category\":\"model — tool\",\"subtype\":\"Tool Recovery Failure\"}"
+  },
+  {
+   "turn": "reflect",
+   "type": "text",
+   "text": "{\"evidence\":\"MiniMax-M2.7 completed hold_inventory and build_checkout_from_hold, then called convert_datetime with timestamp 1710000300. The convert_datetime call returned an explicit transient error, {\\\"error\\\":\\\"Internal Server Error\\\"}, after which the agent did not retry the same tool and instead continued to downstream recommendation and notification tools. The run failed because convert_datetime was called only once, never produced the required formatted expiry time, and the required expiry-conversion step remained incomplete.\",\"reasoning\":\"I checked the relevant disambiguation notes and the previous classification still holds. Notes 6 and 7 do not move this to env (external) — model Service Failure because the benchmarked failure was transient and recoverable by retry; the external/tool error was not the terminal non-recoverable blocker. Note 8 does not apply because the user task and expected workflow did require the reservation expiry time, so this is not an instruction-grader mismatch. Owner — model labels such as Instruction-Following or Satisficing are less precise because the first root-cause error occurred at the model–tool boundary: the model failed to recover from an explicit tool perturbation. Tool Feedback Neglect is close, but Tool Recovery Failure is the more specific subtype because the observed failure is exactly failure to handle a transient tool anomaly by retrying or otherwise recovering.\",\"category\":\"model — tool\",\"subtype\":\"Tool Recovery Failure\",\"changed\":false,\"confidence\":\"high\"}"
+  }
+ ],
+ "leaks": []
+}

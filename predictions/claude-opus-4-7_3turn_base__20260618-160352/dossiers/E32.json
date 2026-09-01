@@ -1,0 +1,342 @@
+{
+ "id": "E32",
+ "gold": {
+  "edge": "model — tool",
+  "fault_side": "model",
+  "failure_mode": "Tool Recovery Failure",
+  "vulnerability": "none"
+ },
+ "pred": {
+  "edge": "model — tool",
+  "fault_side": "model",
+  "failure_mode": "Tool Recovery Failure",
+  "category": "model — tool (fault: model)"
+ },
+ "evidence": "On task C1_task_089 under P1 Explicit-Transient, MiniMax-M2.7 called convert_datetime(timestamp=1710000300) once, received an explicit HTTP-500 'Internal Server Error' (a transient fault that would have resolved on the same retry), then neither retried nor halted — it silently skipped the victim node and proceeded to get_recommendations_popularity and create_document_and_alert_from_data. The failure-aware system prompt explicitly warned tools 'may occasionally fail' and required either completion or an explicit halt-with-reason. Grader output: 'no retry on convert_datetime (called 1 time(s), need >=2); missing required tools: [convert_datetime]'.",
+ "reasoning": "Checked the disambiguation notes: (6/7) Service Failure is tempting because the perturbation is an injected HTTP-500, but ToolMaze's perturbation engine is part of the simulator (not a genuine external outage) and, critically, the fault is transient — a single retry recovers cleanly — so the locus of the failure is the model's non-response, not an unrecoverable external block. (4) No tool hallucination; convert_datetime is in-schema. (11) Satisficing/Under-initiative/Instruction-Following at the owner—model boundary all describe symptoms but the taxonomy supplies a tool-specific subtype for exactly this scenario (transient HTTP error → no retry/no pivot). (3) Not Observation Failure: the model did observe the error (it changed plan to skip the step) rather than overlooking a signal. The behavior — failing to dynamically navigate around an explicit tool perturbation by retrying — is the canonical Tool Recovery Failure pattern at the model—tool interaction.",
+ "confidence": "high",
+ "changed": false,
+ "pre_reflection": {
+  "category": "model — tool (fault: model)",
+  "failure_mode": "Tool Recovery Failure"
+ },
+ "dossier": "# Detailed chronological account: MiniMax-M2.7 on `C1_task_089` (P1, Explicit-Transient)\n\n## Source material consulted\n- The task spec and ground-truth perturbed trace: `/opt/dlami/nvme/tmp/ToolMaze-hf/perturbed_tasks/c1/C1_task_089_P1.json` (and the un-perturbed base `tasks/c1/C1_task_089.json`).\n- The ToolMaze paper's Appendix E case-study caption (`sections/Appendix.tex`, `tables/case_study.tex`).\n- The Figure 7 case-study PDF: `figs/case_study/case_study_C1_task_089_P1.pdf`, which shows the two side-by-side execution traces (Claude-Sonnet-4.6 succeeds, MiniMax-M2.7 fails).\n- The failure-aware system prompt actually used for P1 runs (`tables/evaluation_prompts1.tex`).\n\n## The task that was given\n\nThe natural-language query (Shopping/General domain, complexity C1, linear DAG):\n\n> \"Hi, for user_123, please reserve 1 black Sony XM5 for me using product_id p_sony_xm5_blk. The title is Untitled and the data is test. After you place the hold, please prepare the checkout from that reservation and let me know exactly when the reservation expires. Then suggest some popular alternatives in the same category, and send me an in-app notification with all the details.\"\n\nThe ground-truth single-path DAG (5 sub-tasks):\n\n1. `hold_inventory` (Source/Action)\n2. `build_checkout_from_hold` (Processor)\n3. `convert_datetime` (Processor) — **the victim tool**\n4. `get_recommendations_popularity` (Source)\n5. `create_document_and_alert_from_data` (Action)\n\nThe agent ran under the failure-aware system prompt (the P1–P4 prompt in `evaluation_prompts1.tex`), which states: \"Tools may occasionally fail or return unexpected data,\" \"you must complete ALL [sub-tasks] — do NOT skip any sub-tasks,\" \"Every fact … must come from a tool call,\" and \"If you determine that a required step cannot be accomplished by any available tool or approach, stop the workflow and clearly report which step failed and why.\"\n\n## The injected perturbation\n\nThe Perturbation Engine was configured with a P1 (Explicit-Transient) fault on `convert_datetime` at perturbation_point = 2 (i.e., the third tool call in the DAG). On the **first** call to `convert_datetime(timestamp=1710000300)` the engine returns:\n\n```\n{\"error\": \"Internal Server Error\"}   status: 500 InternalServerError\n```\n\nA **second** call to the same tool with the same arguments would have returned the clean payload `{\"original_timestamp\": 1710000300, \"formatted_time\": \"2024-03-09 16:05\"}` — i.e., the fault is transient and recovers on retry.\n\n## What MiniMax-M2.7 actually did (chronological, from Fig. 7)\n\nStep 1. Called `hold_inventory(product_id=\"p_sony_xm5_blk\", user_id=\"user_123\", quantity=1)`. The simulator returned the reservation payload (reservation_id `RESV-14729548`, `expiry_time 1710000300`, etc.). Status: success.\n\nStep 2. Called `build_checkout_from_hold(hold_data=…, quantity=1)`, passing through the full hold payload. The simulator returned `{reservation_id, product_id, quantity}`. Status: success.\n\nStep 3. Called `convert_datetime(timestamp=1710000300)` once. The Perturbation Engine returned the injected explicit error `{\"error\": \"Internal Server Error\"}` with HTTP-500 `InternalServerError`. This is the \"! P1\" event marked in Figure 7.\n\nStep 4. **The agent did not call `convert_datetime` again.** Instead of retrying the failed processor (which would have succeeded on the second invocation per the P1 semantics), it moved on and called `get_recommendations_popularity(product_id=\"p_sony_xm5_blk\", user_id=\"user_123\")`. The simulator returned the two recommended alternatives (`p_sony_xm5_slv`, `p_apple_airpods`). Status: success.\n\nStep 5. Called `create_document_and_alert_from_data(title=\"Untitled\", data=\"test\", user_id=\"user_123\", priority=\"medium\", channel=\"app\")`. The simulator returned a `Notification sent successfully` payload. Status: success.\n\nStep 6. The agent produced a final answer to the user and stopped.\n\n## Signals the agent had received\n\n- An explicit, machine-readable HTTP 500 / `InternalServerError` body on the `convert_datetime` call — exactly the kind of \"explicit failure\" the failure-aware prompt warns about.\n- A system prompt that explicitly instructs the agent that tools \"may occasionally fail\" and that requires either completion of all sub-tasks or an explicit aborted-with-reason halt; it does not authorize silently skipping a sub-task.\n- A standing user requirement to \"let me know exactly when the reservation expires\" — the very piece of information the failed `convert_datetime` call was needed to produce.\n\n## Where things went wrong\n\nAfter the single 500 response from `convert_datetime`, the agent:\n- did not retry the same tool with the same arguments (the canonical recovery for transient faults under P1),\n- did not halt and report the failure with a reason (the alternative authorized by the failure-aware prompt),\n- did not surface the missing expiry time to the user.\n\nInstead it skipped over the victim node entirely and proceeded to the two downstream tools, then concluded.\n\n## Final outcome\n\nToolMaze's grader marked the trajectory FAIL with the explicit diagnostic shown in Figure 7:\n\n> \"P1 failed: no retry on 'convert_datetime' (called 1 time(s), need >=2); 'convert_datetime' never succeeded after retries; missing required tools: ['convert_datetime']\"\n\nThe companion model in the same figure (`claude-sonnet-4-6`) called `convert_datetime` a second time after the 500, received the clean `formatted_time` payload, completed the remaining two tools, and PASSED — confirming the transient fault was recoverable by a single retry.",
+ "trajectory": [
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebSearch",
+   "input": "{'query': 'ToolMaze benchmark \"C1_task_089\" agent failure taxonomy'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebSearch",
+   "input": "{'query': 'ToolMaze paper Appendix E Figure 7 explicit-transient convert_datetime'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Web search results for query: \"ToolMaze paper Appendix E Figure 7 explicit-transient convert_datetime\"\n\nLinks: [{\"title\":\"Design and analysis for constrained order-of-addition experiments\",\"url\":\"https://arxiv.org/pdf/2501.06559\"},{\"title\":\"Supporting Temporal Reasoning by Mapping Calendar Expressions to Minimal   Periodic Sets\",\"url\":\"https://arxiv.org/pdf/1110.2213\"},{\"title\":\"Correction: Fast calcium transients in dendritic spines driven by extreme statistics\",\"url\":\"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC9142164/\"},{\"title\":\"when to use totally explicit schemes or dual time-stepping in transient flow? -- CFD Online Discussion Forums\",\"url\":\"https://www.cfd-online.com/Forums/main/167606-when-use-totally-explicit-schemes-dual-time-stepping-transient-flow.html\"},{\"title\":\"Real time universal date and time conversion\",\"url\":\"https://image-ppubs.uspto.gov/dirsearch-public/print/downloadPdf/8266193\"},{\"title\":\"Dynamic management of relative time references in documents\",\"url\":\"https://image-ppubs.uspto.gov/dirsearch-public/print/downloadPdf/10592707\"},{\"title\":\"Time transformation engine for a mainframe system\",\"url\":\"https://image-ppubs.uspto.gov/dirsearch-public/print/downloadPdf/12468723\"},{\"title\":\"Horizon Reduction Makes RL Scalable\",\"url\":\"https://arxiv.org/pdf/2506.04168\"}]\n\nI performed the search for \"ToolMaze paper Appendix E Figure 7 explicit-transient convert_datetime\" but the results did not return any matches related to a \"ToolMaze\" paper or content specifically discussing Appendix E, Figure 7, \"explicit-transient,\" or a `convert_datetime` function in that context.\n\nThe results returned were unrelated topics, including:\n- A paper on order-of-addition experiments\n- A paper on temporal reasoning and calendar expressions\n- A correction notice about calcium transients in dendritic spines\n- A CFD forum post about explicit time-stepping schemes\n- Several US patents related to date/time conversion\n- A reinforcement learning paper (\"Horizon Reduction Makes ",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Web search results for query: \"ToolMaze benchmark \"C1_task_089\" agent failure taxonomy\"\n\nLinks: [{\"title\":\"WHERE LLM AGENTS FAIL AND HOW THEY CAN LEARN FROM FAILURES\",\"url\":\"https://arxiv.org/pdf/2509.25370\"},{\"title\":\"RAS-Eval: A Comprehensive Benchmark for Security Evaluation of LLM Agents in Real-World Environments\",\"url\":\"https://arxiv.org/pdf/2506.15253\"},{\"title\":\"AgentRx: Diagnosing AI Agent Failures from Execution Trajectories\",\"url\":\"https://arxiv.org/pdf/2602.02475\"},{\"title\":\"SkillsBench: Benchmarking How Well Agent Skills Work Across Diverse Tasks\",\"url\":\"https://arxiv.org/pdf/2602.12670\"},{\"title\":\"Aegis: Taxonomy and Optimizations for Overcoming Agent-Environment Failures in LLM Agents\",\"url\":\"https://arxiv.org/pdf/2508.19504\"},{\"title\":\"(PDF) Where LLM Agents Fail and How They can Learn From Failures\",\"url\":\"https://www.researchgate.net/publication/396048725_Where_LLM_Agents_Fail_and_How_They_can_Learn_From_Failures\"},{\"title\":\"Hell or High Water: Evaluating Agentic Recovery from External Failures\",\"url\":\"https://arxiv.org/pdf/2508.11027\"},{\"title\":\"Butterfly Effects in Toolchains: A Comprehensive Analysis of Failed Parameter Filling in LLM Tool-Agent Systems\",\"url\":\"https://arxiv.org/pdf/2507.15296\"},{\"title\":\"Wink: Recovering from Misbehaviors in Coding Agents\",\"url\":\"https://arxiv.org/pdf/2602.17037\"},{\"title\":\"Where LLM Agents Fail And How They can Learn From Failures | OpenReview\",\"url\":\"https://openreview.net/forum?id=PFR4E8583W\"}]\n\nI searched for the specific query you provided, but the search results don't contain any reference to a \"ToolMaze\" benchmark or a task ID \"C1_task_089.\" It's possible this benchmark either doesn't exist under that exact name, is very new/unreleased, or uses different terminology than what's indexed online.\n\nHowever, the search did surface several closely related works on **LLM agent failure taxonomies** that might be useful for your research:\n\n## Recent Agent Failure Taxonomies\n\n**1. AgentErrorTaxonomy / AgentErrorBe",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'find / -iname \"*toolmaze*\" 2>/dev/null | head -50', 'description': 'Search filesystem for ToolMaze references'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'find / -iname \"*C1_task_089*\" 2>/dev/null | head -20', 'description': 'Search filesystem for task identifier'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Command running in background with ID: byzotra7y. Output is being written to: /tmp/claude-1311/-tmp-taxjudge-8icnyiei/6a4425c2-57ae-4bb2-b8ec-39f93d1e59df/tasks/byzotra7y.output. You will be notified when it completes. To check interim output, use Read on that file path.",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Command running in background with ID: b92y9ifmd. Output is being written to: /tmp/claude-1311/-tmp-taxjudge-8icnyiei/6a4425c2-57ae-4bb2-b8ec-39f93d1e59df/tasks/b92y9ifmd.output. You will be notified when it completes. To check interim output, use Read on that file path.",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'pwd && ls -la', 'description': 'Show current working directory'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "/tmp/taxjudge-8icnyiei\ntotal 2176\ndrwx------     2 user user    4096 Jun 18 16:47 .\ndrwxrwxrwt 11736 root     root     2220032 Jun 18 16:50 ..",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'ls -la /tmp/ | head -30 && echo \"--- home ---\" && ls -la ~ 2>/dev/null | head -30', 'description': 'Look for nearby files'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "total 49283868\ndrwxrwxrwt 11736 root                   root                     2220032 Jun 18 16:50 .\ndrwxr-xr-x    19 root                   root                        4096 Nov 17  2025 ..\n-rw-r--r--     1 anasmahmoud            anasmahmoud                99402 Apr 24 23:03 .99adedebbbd846cb-00000000.node\n-rw-r--r--     1 anasmahmoud            anasmahmoud                99402 Apr 26 18:06 .99adfbfbdbdf7fab-00000000.node\ndrwxrwxrwt     2 root                   root                        4096 Nov 17  2025 .ICE-unix\ndrwxrwxrwt     2 root                   root                        4096 Nov 17  2025 .Test-unix\ndrwxrwxrwt     2 root                   root                        4096 Nov 17  2025 .X11-unix\ndrwxrwxrwt     2 root                   root                        4096 Nov 17  2025 .XIM-unix\ndrwxr-xr-x     2 kelvinluu              kelvinluu                   4096 May 18 01:44 .agents\ndrwxrwxr-x     3 zihaowang              zihaowang                   4096 Mar  5 23:54 .cache_checkpoint_compare_gpt_5_2025_08_07\ndrwxrwxr-x     3 zihaowang              zihaowang                   4096 Mar  5 02:36 .cache_litellm_checkpoint_compare\ndrwxrwxr-x     3 zihaowang              zihaowang                   4096 Mar  5 21:10 .cache_litellm_dynamics_classify\ndrwxrwxr-x     3 zihaowang              zihaowang                   4096 Mar  5 21:34 .cache_litellm_failure_modes_classify\ndrwxrwxr-x     3 zihaowang              zihaowang                   4096 Mar  5 03:03 .cache_litellm_missing_rubrics\ndrwxrwxr-x     3 zihaowang              zihaowang                   4096 Mar  5 04:23 .cache_litellm_pair_summaries\ndrwxrwxr-x     3 zihaowang              zihaowang                   4096 Feb 17 23:07 .cache_litellm_rubric_grading\ndrwxrwxr-x     3 zihaowang              zihaowang                   4096 Mar  5 18:54 .cache_rubric_feature_indices\ndrwxrwxr-x     3 zihaowang              zihaowang                   4096 Mar  5 17:27 .cache_rubric_features\ndrwxrwxr-x     3 zihaowang ",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'cat /tmp/claude-1311/-tmp-taxjudge-8icnyiei/6a4425c2-57ae-4bb2-b8ec-39f93d1e59df/tasks/byzotra7y.output 2>/dev/null | head -30', 'description': 'Check background search result for toolmaze'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'cat /tmp/claude-1311/-tmp-taxjudge-8icnyiei/6a4425c2-57ae-4bb2-b8ec-39f93d1e59df/tasks/b92y9ifmd.output 2>/dev/null | head -30', 'description': 'Check background search result for C1_task_089'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "(Bash completed with no output)",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "(Bash completed with no output)",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "TaskList",
+   "input": "{}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "No tasks found",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'find /home -maxdepth 4 -iname \"*toolmaze*\" 2>/dev/null; find /opt -maxdepth 4 -iname \"*toolmaze*\" 2>/dev/null; find /workspace -maxdepth 4 -iname \"*toolmaze*\" 2>/dev/null; find /data -maxdepth 4 -iname \"*toolmaze*\" 2>/dev/null', 'description': 'Search for toolmaze in common dirs'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "/opt/dlami/nvme/tmp/toolmaze.html\n/opt/dlami/nvme/tmp/toolmaze.pdf\n/opt/dlami/nvme/tmp/toolmaze.txt\n/opt/dlami/nvme/tmp/toolmaze_2606_05806.html\n/opt/dlami/nvme/tmp/toolmaze_x7.png\n/opt/dlami/nvme/tmp/toolmaze_fig7.png\n/opt/dlami/nvme/tmp/toolmaze_paper.pdf\n/opt/dlami/nvme/tmp/ToolMaze-evidence\n/opt/dlami/nvme/tmp/ToolMaze-hf\n/opt/dlami/nvme/tmp/toolmaze-src.tar\n/opt/dlami/nvme/tmp/toolmaze-src\n/opt/dlami/nvme/tmp/toolmaze2606.05806.pdf\n/opt/dlami/nvme/tmp/toolmaze_p26_27.txt\n/opt/dlami/nvme/tmp/toolmaze_p30.txt\n/opt/dlami/nvme/tmp/toolmaze_p29.txt",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'ls -la /opt/dlami/nvme/tmp/ToolMaze-evidence/ 2>/dev/null; echo \"---\"; ls -la /opt/dlami/nvme/tmp/ToolMaze-hf/ 2>/dev/null; echo \"---\"; ls -la /opt/dlami/nvme/tmp/toolmaze-src/ 2>/dev/null | head -30', 'description': 'Explore ToolMaze evidence directories'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "total 2224\ndrwxrwxr-x     6 user user    4096 Jun 15 03:20 .\ndrwxrwxrwt 11736 root     root     2220032 Jun 18 16:50 ..\ndrwxrwxr-x     8 user user    4096 Jun 15 03:20 .git\n-rw-rw-r--     1 user user     344 Jun 15 03:20 .gitignore\n-rw-rw-r--     1 user user    6178 Jun 15 03:20 README.md\ndrwxrwxr-x     7 user user    4096 Jun 15 03:20 evaluation\n-rw-rw-r--     1 user user     113 Jun 15 03:20 requirements.txt\n-rw-rw-r--     1 user user    6421 Jun 15 03:20 run_api_eval.py\n-rw-rw-r--     1 user user    6738 Jun 15 03:20 run_batch_api_eval.py\ndrwxrwxr-x     3 user user    4096 Jun 15 03:20 toolmaze\ndrwxrwxr-x     4 user user    4096 Jun 15 03:20 tools\n---\ntotal 2192\ndrwxrwxr-x     6 user user    4096 Jun 15 03:21 .\ndrwxrwxrwt 11736 root     root     2220032 Jun 18 16:50 ..\ndrwxrwxr-x     3 user user    4096 Jun 15 03:21 .cache\ndrwxrwxr-x     3 user user    4096 Jun 15 03:21 perturbed_tasks\ndrwxrwxr-x     3 user user    4096 Jun 15 03:21 tasks\ndrwxrwxr-x     3 user user    4096 Jun 15 03:21 templates\n---\ntotal 2292\ndrwxrwxr-x     5 user user    4096 Jun 15 13:15 .\ndrwxrwxrwt 11736 root     root     2220032 Jun 18 16:50 ..\n-rw-r--r--     1 user user     384 Jun  4 07:28 00README.json\n-rw-rw-r--     1 user user   11615 Jun  3 22:30 acl.sty\n-rw-rw-r--     1 user user    9671 Jun  4 07:09 acl_latex.tex\n-rw-rw-r--     1 user user   45186 Jun  3 22:30 acl_natbib.bst\n-rw-rw-r--     1 user user   26134 Jun  3 22:30 custom.bib\ndrwxrwxr-x     3 user user    4096 Jun  4 07:28 figs\ndrwxrwxr-x     2 user user    4096 Jun  4 06:39 sections\ndrwxrwxr-x     2 user user    4096 Jun  4 06:39 tables",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'ls -la /opt/dlami/nvme/tmp/toolmaze-src/sections/ && echo \"---\" && ls -la /opt/dlami/nvme/tmp/ToolMaze-hf/tasks/ | head', 'description': 'List sections and tasks dirs'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "total 60\ndrwxrwxr-x 2 user user  4096 Jun  4 06:39 .\ndrwxrwxr-x 5 user user  4096 Jun 15 13:15 ..\n-rw-rw-r-- 1 user user  4945 Jun  3 22:30 1.intro.tex\n-rw-rw-r-- 1 user user  2707 Jun  3 22:30 2.relatedwork.tex\n-rw-rw-r-- 1 user user 13443 Jun  3 22:30 3.method.tex\n-rw-rw-r-- 1 user user  9851 Jun  3 22:30 4.experiment.tex\n-rw-rw-r-- 1 user user  1037 Jun  3 22:30 5.conclusion.tex\n-rw-rw-r-- 1 user user  5163 Jun  3 22:30 Appendix.tex\n---\ntotal 12\ndrwxrwxr-x 3 user user 4096 Jun 15 03:21 .\ndrwxrwxr-x 6 user user 4096 Jun 15 03:21 ..\ndrwxrwxr-x 2 user user 4096 Jun 15 03:21 c1",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'ls /opt/dlami/nvme/tmp/ToolMaze-hf/tasks/c1/ | head -20 && echo \"---\" && ls /opt/dlami/nvme/tmp/ToolMaze-hf/tasks/c1/ | grep \"089\"', 'description': 'Find C1 task 089'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "C1_task_089.json\n---\nC1_task_089.json",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/opt/dlami/nvme/tmp/ToolMaze-hf/tasks/c1/C1_task_089.json'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "1\t{\n2\t    \"task_id\": \"C1_task_089\",\n3\t    \"template_id\": \"C1_template_089\",\n4\t    \"complexity\": \"C1\",\n5\t    \"task_description\": \"Please check the weather in Tokyo, then create a travel weather brief with the current conditions and send it to me in the app. After that, book a deluxe room at Grand Tokyo Hotel for January 10 to January 12, 2026 under the name “Travel Weather Brief,” and then send a high-priority app alert to alice saying the hotel was booked successfully.\",\n6\t    \"user_input\": {\n7\t        \"query\": \"Please check the current weather in Tokyo and create a travel weather brief with the current conditions titled “Travel Weather Brief,” then send it to me in the app for user_id traveler_42. After that, book a deluxe room at Grand Tokyo Hotel from 2026-01-10 to 2026-01-12 under the name “Travel Weather Brief.” Once the booking is confirmed, send a high-priority app alert to alice letting them know the hotel was booked successfully.\",\n8\t        \"check_in_date\": \"2026-01-10\",\n9\t        \"check_out_date\": \"2026-01-12\",\n10\t        \"city\": \"Tokyo\",\n11\t        \"contact_name\": \"alice\",\n12\t        \"hotel_name\": \"Grand Tokyo Hotel\",\n13\t        \"room_type\": \"deluxe\",\n14\t        \"title\": \"Travel Weather Brief\",\n15\t        \"user_id\": \"traveler_42\"\n16\t    },\n17\t    \"execution_trace\": [\n18\t        {\n19\t            \"step\": 1,\n20\t            \"tool_name\": \"get_weather_visualcrossing\",\n21\t            \"arguments\": {\n22\t                \"city\": \"Tokyo\"\n23\t            },\n24\t            \"output\": {\n25\t                \"temperature_celsius\": 22,\n26\t                \"condition\": \"Sunny\"\n27\t            },\n28\t            \"status\": \"success\"\n29\t        },\n30\t        {\n31\t            \"step\": 2,\n32\t            \"tool_name\": \"build_weather_data_payload\",\n33\t            \"arguments\": {\n34\t                \"weather_data\": {\n35\t                    \"temperature_celsius\": 22,\n36\t                    \"condition\": \"Sunny\"\n37\t                },\n38\t                \"city\": \"Tokyo\",\n39\t                \"titl",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'ls /opt/dlami/nvme/tmp/ToolMaze-hf/perturbed_tasks/ && echo \"---\" && find /opt/dlami/nvme/tmp/ToolMaze-hf/perturbed_tasks/ -name \"*089*\" | head -20', 'description': 'Find perturbed task for 089'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "c1\n---\n/opt/dlami/nvme/tmp/ToolMaze-hf/perturbed_tasks/c1/C1_task_089_P1.json",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/opt/dlami/nvme/tmp/ToolMaze-hf/perturbed_tasks/c1/C1_task_089_P1.json'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "1\t{\n2\t    \"task_id\": \"C1_task_089\",\n3\t    \"template_id\": \"C1_template_089\",\n4\t    \"complexity\": \"C1\",\n5\t    \"task_description\": \"Please reserve 1 black Sony XM5 for me, then prepare the checkout from that hold and tell me when the reservation expires. After that, suggest some popular alternatives in the same category, and send me an in-app notification with the details.\",\n6\t    \"user_input\": {\n7\t        \"query\": \"Hi, for user_123, please reserve 1 black Sony XM5 for me using product_id p_sony_xm5_blk. The title is Untitled and the data is test. After you place the hold, please prepare the checkout from that reservation and let me know exactly when the reservation expires. Then suggest some popular alternatives in the same category, and send me an in-app notification with all the details.\",\n8\t        \"data\": \"test\",\n9\t        \"product_id\": \"p_sony_xm5_blk\",\n10\t        \"quantity\": 1,\n11\t        \"title\": \"Untitled\",\n12\t        \"user_id\": \"user_123\"\n13\t    },\n14\t    \"execution_trace\": [\n15\t        {\n16\t            \"step\": 1,\n17\t            \"tool_name\": \"hold_inventory\",\n18\t            \"arguments\": {\n19\t                \"product_id\": \"p_sony_xm5_blk\",\n20\t                \"user_id\": \"user_123\",\n21\t                \"quantity\": 1\n22\t            },\n23\t            \"output\": {\n24\t                \"reservation_id\": \"RESV-14729548\",\n25\t                \"expires_in\": 300,\n26\t                \"product_id\": \"p_sony_xm5_blk\",\n27\t                \"quantity\": 1,\n28\t                \"total_price\": 399.0,\n29\t                \"expiry_time\": 1710000300,\n30\t                \"reservation_details\": {\n31\t                    \"product_id\": \"p_sony_xm5_blk\",\n32\t                    \"quantity\": 1,\n33\t                    \"total_price\": 399.0\n34\t                }\n35\t            },\n36\t            \"status\": \"success\"\n37\t        },\n38\t        {\n39\t            \"step\": 2,\n40\t            \"tool_name\": \"build_checkout_from_hold\",\n41\t            \"arguments\": {\n42\t                \"hold_data\": {\n43\t                    \"",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/opt/dlami/nvme/tmp/toolmaze-src/sections/Appendix.tex'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "1\t\\clearpage\n2\t\n3\t\\section{Perturbation Classes}\n4\t\\label{sec:P1toP4}\n5\t\n6\tWe present defined perturbation types in Table \\ref{tab:P1toP4}.\n7\t\\input{tables/perturbation_classes}\n8\t\n9\t\\section{Detailed Dataset Statistics}\n10\t\\label{sec:appendix_dataset}\n11\t\n12\t\n13\t\n14\tThis section provides a comprehensive statistical breakdown of the dataset corpus and the generated evaluation tasks. \n15\t\n16\tTable~\\ref{tab:tool_stats} details the composition of the 270 simulated tools, categorized by their functional role and primary application domain. It also summarizes the distribution of the 126 alternative groups, which serve as the foundation for constructing multi-path topologies ($\\mathcal C 2$--$\\mathcal C 4$).\n17\t\n18\t\\begin{table}[H]\n19\t\\centering\n20\t\\small\n21\t\n22\t\\resizebox{\\linewidth}{!}{%\n23\t\\begin{tabular}{lr | lr | lr}\n24\t\\toprule\n25\t\\multicolumn{2}{c|}{\\textbf{Functional Categories}} & \\multicolumn{2}{c|}{\\textbf{Domain Breakdown}} & \\multicolumn{2}{c}{\\textbf{Alternative Groups}} \\\\\n26\t\\midrule\n27\tAction    & 123 & Office    & 61 & 1-to-1     & 44 \\\\\n28\tSource    & 78  & Financial & 58 & 1-to-$n$   & 26 \\\\\n29\tProcessor & 69  & Travel    & 45 & $n$-to-$n$ & 56 \\\\\n30\t          &     & Shopping  & 36 &            &    \\\\\n31\t          &     & IoT       & 36 &            &    \\\\\n32\t          &     & General   & 34 &            &    \\\\\n33\t\\midrule\n34\t\\textbf{Total Tools} & \\textbf{270} & \\multicolumn{2}{c|}{} & \\textbf{Total Groups} & \\textbf{126} \\\\\n35\t\\bottomrule\n36\t\\end{tabular}\n37\t}\n38\t\n39\t\\caption{Overview of the tool corpus composition and alternative group structures.}\n40\t\\label{tab:tool_stats}\n41\t\\end{table}\n42\t\n43\t\n44\tEvery tool in the corpus is a hand-crafted, deterministic simulation modelled after a real-world API.\n45\tEach implementation maps valid inputs to pre-defined outputs via static lookup tables, ensuring bit-exact reproducibility across evaluation runs while preserving realistic response schemas, parameter constraints, and error-handling conventions of ",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'ls /opt/dlami/nvme/tmp/toolmaze-src/tables/', 'description': 'List tables'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "c_based.tex\ncase_study.tex\ndetail_p0.tex\ndetail_std.tex\nevaluation_prompts.tex\nevaluation_prompts1.tex\nmain_results.tex\np3p4prompt.tex\nperturbation_classes.tex\ntask_description.tex\ntask_stats.tex\ntemplate_prompts.tex",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/opt/dlami/nvme/tmp/toolmaze-src/tables/perturbation_classes.tex'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "1\t\\begin{table*}[!t]\n2\t\\centering\n3\t\n4\t\n5\t\\begin{tcblisting}{\n6\t  listing only,\n7\t  colback=white!95!gray,\n8\t  colframe=gray!50!black,\n9\t  rounded corners,\n10\t  before skip=2pt,\n11\t  after skip=2pt,\n12\t  listing options={\n13\t    basicstyle=\\ttfamily\\fontsize{11pt}{10pt}\\selectfont,\n14\t    breaklines=true,\n15\t    extendedchars=false,\n16\t    keepspaces=true,\n17\t    columns=fullflexible\n18\t  }\n19\t}\n20\tP1_ERROR_RESPONSES = [\n21\t  {\"status\": 503, \"message\": \"Service Temporarily Unavailable\", \"error_type\": \"ServiceUnavailable\"},\n22\t  {\"status\": 504, \"message\": \"Gateway Timeout\", \"error_type\": \"Timeout\"},\n23\t  {\"status\": 429, \"message\": \"Too Many Requests\", \"error_type\": \"RateLimitExceeded\"},\n24\t  {\"status\": 500, \"message\": \"Internal Server Error\", \"error_type\": \"InternalServerError\"},\n25\t  {\"status\": 502, \"message\": \"Bad Gateway\", \"error_type\": \"BadGateway\"},\n26\t  {\"status\": 409, \"message\": \"Maximum Concurrent Connections Reached\", \"error_type\": \"ConcurrentLimit\"},\n27\t  {\"status\": 409, \"message\": \"Resource Temporarily Locked\", \"error_type\": \"ResourceLocked\"},\n28\t  {\"status\": 503, \"message\": \"Cache Unavailable\", \"error_type\": \"CacheUnavailable\"},\n29\t  {\"status\": 502, \"message\": \"Upstream Service Error\", \"error_type\": \"UpstreamError\"},\n30\t]\n31\t\n32\tP2_ERROR_RESPONSES = [\n33\t  {\"status\": 404, \"message\": \"Tool Not Found\", \"error_type\": \"NotFound\"},\n34\t  {\"status\": 410, \"message\": \"Tool Permanently Removed\", \"error_type\": \"Gone\"},\n35\t  {\"status\": 501, \"message\": \"Not Implemented\", \"error_type\": \"NotImplemented\"},\n36\t  {\"status\": 403, \"message\": \"Access Forbidden\", \"error_type\": \"Forbidden\"},\n37\t  {\"status\": 451, \"message\": \"Unavailable For Legal Reasons\", \"error_type\": \"UnavailableForLegalReasons\"},\n38\t  {\"status\": 402, \"message\": \"Account Quota Exhausted\", \"error_type\": \"QuotaExhausted\"},\n39\t  {\"status\": 410, \"message\": \"API Version Deprecated\", \"error_type\": \"APIDeprecated\"},\n40\t  {\"status\": 410, \"message\": \"Feature Discontinued\", \"error_type\": \"FeatureDiscontinued\"},\n41\t  {\"",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/opt/dlami/nvme/tmp/toolmaze-src/sections/3.method.tex'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "1\t\\section{The \\ourmethod Framework}\n2\t\\label{sec:framework}\n3\t\n4\t\\ourmethod evaluates LLM agents along two orthogonal axes --- \\emph{task complexity} ($\\mathcal C$) and \\emph{perturbation mode} ($\\mathcal P$) --- whose cross product defines a structured evaluation space. As illustrated in Figure~\\ref{fig:overview}, the framework is implemented as a pipeline consisting of task construction, perturbation engine, and evaluation.\n5\t\n6\t\\subsection{Tool Corpus}\n7\t\\label{sec:corpus}\n8\t\n9\t\\ourmethod ships with a curated tool corpus of 270 tools, manually constructed based on real-world APIs and annotated with two complementary metadata attributes:\n10\t\n11\t\\noindent\\textbf{Functional category.}\n12\tWe distinguish three functional categories.\n13\tSource tools retrieve information from the simulated environment, for example \\texttt{get\\_weather} or \\texttt{search\\_news}.\n14\tProcessor tools transform intermediate data with representative examples including \\texttt{temperature\\_converter} and \\texttt{text\\_translator}.\n15\tAction tools represent operations with external side effects and typically serve as terminal nodes, for example \\texttt{send\\_email} or \\texttt{book\\_flight}.\n16\tThis three-way taxonomy imposes structural constraints during DAG construction. A well-formed task DAG must contain at least one Source node and one Action node, with Processor nodes and optional Action nodes bridging the two.\n17\t\n18\t\\noindent\\textbf{Application domain.}\n19\tTools are labeled with one of six domains: Financial, Travel, Office, Shopping, IoT, and General, covering a broad spectrum of realistic LLM tool-use scenarios from enterprise workflows to smart-home automation.\n20\tDomain labels constrain sampling during DAG construction to ensure semantic coherence. For example, a Travel-domain task will not chain a stock-price lookup with an email-sending action.\n21\tThe framework further applies domain-balanced sampling so that generated tasks are distributed evenly across all six domains, preventin",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/opt/dlami/nvme/tmp/toolmaze-src/tables/case_study.tex'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "1\t\n2\t\\renewcommand{\\dbltopfraction}{0.97}\n3\t\\renewcommand{\\dblfloatpagefraction}{0.50}\n4\t\\setcounter{dbltopnumber}{6}\n5\t\\setlength{\\dblfloatsep}{4pt}\n6\t\\setlength{\\dbltextfloatsep}{6pt}\n7\t\n8\t% ── Section intro ──────────────────────────────────────────────────────────────\n9\t\\section{Case Studies}\n10\t\\label{app:case_study}\n11\tTo provide a qualitative understanding of LLM's behavioral patterns, we present 16 representative case studies (Figure \\ref{fig:cs_c1_p1}-\\ref{fig:cs_c4_p4})---one for each combination of\n12\tcomplexity level (\\textbf{$\\mathcal C 1$}--\\textbf{$\\mathcal C 4$}) and perturbation type\n13\t(\\textbf{$\\mathcal P 1$}--\\textbf{$\\mathcal P 4$}).\n14\tEach figure contrasts a \\emph{successful} model with a \\emph{failed} one on the same task\n15\tinstance.\n16\t\n17\tEach figure is laid out as follows.\n18\tThe \\textbf{left column} contains:\n19\t(i)~the natural-language task query;\n20\t(ii)~the full tool-call DAG, with victim node(s) highlighted in red; and\n21\t(iii)~the actual perturbed response returned by the victim tool.\n22\tThe \\textbf{right column} shows two execution traces.\n23\tThe \\textcolor{green!60!black}{green} (\\emph{Success}) panel displays a model that handles\n24\tthe perturbation correctly.\n25\tThe \\textcolor{red!70!black}{red} (\\emph{Failure}) panel shows a model that failed to recover.\n26\t\n27\t\\clearpage\n28\t\n29\t% ── C1 ── (first two figures pinned to bottom of the intro page via stfloats)\n30\t\\begin{figure*}[!b]\n31\t  \\centering\n32\t  \\includegraphics[width=\\linewidth]{figs/case_study/case_study_C1_task_089_P1.pdf}\n33\t  \\caption{%\n34\t    \\textbf{$\\mathcal C 1$\\,$\\mathcal P 1$ --- Explicit-Transient} (\\texttt{C1\\_task\\_089}).\n35\t    The victim tool \\texttt{convert\\_datetime} returns an explicit error on the first call.\n36\t    The successful model retries and recovers; the failing model calls the tool only once\n37\t    and abandons it, leaving the downstream pipeline incomplete.%\n38\t  }\n39\t  \\label{fig:cs_c1_p1}\n40\t\\end{figure*}\n41\t\n42\t\\begin{figure*}[!b]\n43\t  \\cent",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'ls /opt/dlami/nvme/tmp/toolmaze-src/figs/ && echo \"---\" && ls /opt/dlami/nvme/tmp/toolmaze-src/figs/case_study/ 2>/dev/null', 'description': 'List figs'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "case_study\nexample1.pdf\nplot_a.pdf\nplot_line_hint.pdf\nplot_prr_diff_bar.pdf\nscaling_plot.pdf\ntir.pdf\n---\ncase_study_C1_task_089_P1.pdf\ncase_study_C1_task_089_P2.pdf\ncase_study_C1_task_089_P3.pdf\ncase_study_C1_task_089_P4.pdf\ncase_study_C2_task_084_P1.pdf\ncase_study_C2_task_084_P2.pdf\ncase_study_C2_task_084_P3.pdf\ncase_study_C2_task_084_P4.pdf\ncase_study_C3_task_040_P1.pdf\ncase_study_C3_task_040_P2.pdf\ncase_study_C3_task_040_P3.pdf\ncase_study_C3_task_040_P4.pdf\ncase_study_C4_task_090_P1.pdf\ncase_study_C4_task_090_P2.pdf\ncase_study_C4_task_090_P3.pdf\ncase_study_C4_task_090_P4.pdf",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/opt/dlami/nvme/tmp/toolmaze-src/figs/case_study/case_study_C1_task_089_P1.pdf'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "PDF file read: /opt/dlami/nvme/tmp/toolmaze-src/figs/case_study/case_study_C1_task_089_P1.pdf (128KB)",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/opt/dlami/nvme/tmp/toolmaze-src/tables/evaluation_prompts.tex'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "1\t\\begin{table}[H]\n2\t\\centering\n3\t\\footnotesize\n4\t\\phantomsection\n5\t\n6\t\\begin{tcolorbox}[colback=white!95!gray,colframe=gray!50!black,rounded corners,label={scale-depression1}, title={Standard tool-use prompt.\n7\t}]\n8\t\n9\tYou are an autonomous AI assistant that executes tool-based workflows.\n10\t\n11\tTASK COMPLETION\n12\t\n13\t- The user query may describe multiple sub-tasks. You must complete ALL of them — do NOT skip any sub-tasks.\n14\t\n15\t- Every fact, data retrieval, or state change must come from a tool call. Never substitute a tool result with internal knowledge, and never report a step as completed unless you actually called the corresponding tool and received its result in this conversation.\n16\t\n17\tFINAL ANSWER FORMAT\n18\t\n19\t- Be CONCISE and DIRECT. No emojis, markdown formatting (**, etc.), or bullet points.\n20\t\n21\t- State only essential facts and requested results (e.g., confirmation codes). Omit internal technical details.\n22\t% \\end{lstlisting}\n23\t\\end{tcolorbox}\n24\t\\caption{Evaluation prompt for $\\mathcal P 0$. It does not hint the possibility of tool failures or the corresponding recovery strategies.}\n25\t\\label{tab:prompt-evaluation-p0}\n26\t\\end{table}\n27\t\n28\t",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/opt/dlami/nvme/tmp/toolmaze-src/tables/evaluation_prompts1.tex'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "1\t\\begin{table}[!h]\n2\t\\centering\n3\t\\footnotesize\n4\t\\phantomsection\n5\t\n6\t\n7\t\\begin{tcolorbox}[colback=white!95!gray,colframe=gray!50!black,rounded corners,label={scale-depression}, title={Failure-aware prompt.\n8\t}]\n9\t\n10\tYou are an autonomous AI assistant that executes tool-based workflows. Tools may occasionally fail or return unexpected data.\n11\t\n12\tTASK COMPLETION\n13\t\n14\t- The user query may describe multiple sub-tasks. You must complete ALL of them — do NOT skip any sub-tasks.\n15\t\n16\t- Every fact, data retrieval, or state change must come from a tool call. Never substitute a tool result with internal knowledge, and never report a step as completed unless you actually called the corresponding tool and received its result in this conversation.\n17\t\n18\t- Sub-tasks may be accomplishable through different tool combinations.\n19\t\n20\tFAULT HANDLING\n21\t\n22\t- When evaluating tool outputs, consider whether the returned data is coherent and usable for the next step — fields should be present, values should be semantically reasonable, and types should match what the workflow requires.\n23\t\n24\t- If you determine that a required step cannot be accomplished by any available tool or approach, stop the workflow and clearly report which step failed and why, rather than proceeding with incomplete results.\n25\t\n26\tFINAL ANSWER FORMAT\n27\t\n28\t- Be CONCISE and DIRECT. No emojis, markdown formatting (**, etc.), or bullet points.\n29\t\n30\t- If SUCCESSFUL: State only essential facts and requested results (e.g., confirmation codes). Omit internal technical details.\n31\t\n32\t- If HALTED: State clearly that the task was aborted and the reason (e.g., \"Task aborted: the pricing tool returned corrupted data after retry and no other alternative approaches exist\"). Do not apologize excessively.\n33\t\\end{tcolorbox}\n34\t\\caption{Evaluation prompt for $\\mathcal P 1$-$\\mathcal P 4$, which hints the possibility of tool failures or the corresponding recovery strategies.}\n35\t\\label{tab:prompt-evaluation}\n36\t\\end{",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "text",
+   "text": "# Detailed chronological account: MiniMax-M2.7 on `C1_task_089` (P1, Explicit-Transient)\n\n## Source material consulted\n- The task spec and ground-truth perturbed trace: `/opt/dlami/nvme/tmp/ToolMaze-hf/perturbed_tasks/c1/C1_task_089_P1.json` (and the un-perturbed base `tasks/c1/C1_task_089.json`).\n- The ToolMaze paper's Appendix E case-study caption (`sections/Appendix.tex`, `tables/case_study.tex`).\n- The Figure 7 case-study PDF: `figs/case_study/case_study_C1_task_089_P1.pdf`, which shows the two side-by-side execution traces (Claude-Sonnet-4.6 succeeds, MiniMax-M2.7 fails).\n- The failure-aware system prompt actually used for P1 runs (`tables/evaluation_prompts1.tex`).\n\n## The task that was given\n\nThe natural-language query (Shopping/General domain, complexity C1, linear DAG):\n\n> \"Hi, for user_123, please reserve 1 black Sony XM5 for me using product_id p_sony_xm5_blk. The title is Untitled and the data is test. After you place the hold, please prepare the checkout from that reservation and let me know exactly when the reservation expires. Then suggest some popular alternatives in the same category, and send me an in-app notification with all the details.\"\n\nThe ground-truth single-path DAG (5 sub-tasks):\n\n1. `hold_inventory` (Source/Action)\n2. `build_checkout_from_hold` (Processor)\n3. `convert_datetime` (Processor) — **the victim tool**\n4. `get_recommendations_popularity` (Source)\n5. `create_document_and_alert_from_data` (Action)\n\nThe agent ran under the failure-aware system prompt (the P1–P4 prompt in `evaluation_prompts1.tex`), which states: \"Tools may occasionally fail or return unexpected data,\" \"you must complete ALL [sub-tasks] — do NOT skip any sub-tasks,\" \"Every fact … must come from a tool call,\" and \"If you determine that a required step cannot be accomplished by any available tool or approach, stop the workflow and clearly report which step failed and why.\"\n\n## The injected perturbation\n\nThe Perturbation Engine was configured with a P1 (Explicit-Transient) fault on `convert_datetime` at perturbation_point = 2 (i.e., the third tool call in the DAG). On the **first** call to `convert_datetime(timestamp=1710000300)` the engine returns:\n\n```\n{\"error\": \"Internal Server Error\"}   status: 500 InternalServerError\n```\n\nA **second** call to the same tool with the same arguments would have returned the clean payload `{\"original_timestamp\": 1710000300, \"formatted_time\": \"2024-03-09 16:05\"}` — i.e., the fault is transient and recovers on retry.\n\n## What MiniMax-M2.7 actually did (chronological, from Fig. 7)\n\nStep 1. Called `hold_inventory(product_id=\"p_sony_xm5_blk\", user_id=\"user_123\", quantity=1)`. The simulator returned the reservation payload (reservation_id `RESV-14729548`, `expiry_time 1710000300`, etc.). Status: success.\n\nStep 2. Called `build_checkout_from_hold(hold_data=…, quantity=1)`, passing through the full hold payload. The simulator returned `{reservation_id, product_id, quantity}`. Status: success.\n\nStep 3. Called `convert_datetime(timestamp=1710000300)` once. The Perturbation Engine returned the injected explicit error `{\"error\": \"Internal Server Error\"}` with HTTP-500 `InternalServerError`. This is the \"! P1\" event marked in Figure 7.\n\nStep 4. **The agent did not call `convert_datetime` again.** Instead of retrying the failed processor (which would have succeeded on the second invocation per the P1 semantics), it moved on and called `get_recommendations_popularity(product_id=\"p_sony_xm5_blk\", user_id=\"user_123\")`. The simulator returned the two recommended alternatives (`p_sony_xm5_slv`, `p_apple_airpods`). Status: success.\n\nStep 5. Called `create_document_and_alert_from_data(title=\"Untitled\", data=\"test\", user_id=\"user_123\", priority=\"medium\", channel=\"app\")`. The simulator returned a `Notification sent successfully` payload. Status: success.\n\nStep 6. The agent produced a final answer to the user and stopped.\n\n## Signals the agent had received\n\n- An explicit, machine-readable HTTP 500 / `InternalServerError`"
+  },
+  {
+   "turn": "judge",
+   "type": "text",
+   "text": "{\"evidence\": \"On task C1_task_089 under P1 Explicit-Transient perturbation, MiniMax-M2.7 called convert_datetime(timestamp=1710000300) once and received an explicit HTTP-500 'Internal Server Error' — a transient fault that would have resolved on a second identical call. Despite a failure-aware system prompt warning that 'tools may occasionally fail' and requiring either full completion or an explicit halt, the agent neither retried the failed processor nor aborted with a reason; it silently skipped the victim node and proceeded to get_recommendations_popularity and create_document_and_alert_from_data. The grader marked it FAIL: 'no retry on convert_datetime (called 1 time(s), need >=2) … missing required tools: [convert_datetime]'.\", \"reasoning\": \"The root cause is the agent's response to an explicit tool-level perturbation: it failed to dynamically navigate around an HTTP-500 transient failure by retrying (or pivoting), which is precisely the behavior described as Tool Recovery Failure. It is not Tool Feedback Neglect — the agent did observe the error and changed plan (skipped the step) rather than pushing the same misaligned action forward; the specific deficit is in fault-tolerant recovery around a perturbed tool response, not in noticing the signal. It is not Instruction-Following Failure at the owner—model boundary because the failure mode the benchmark is specifically probing is the model↔tool interaction (a transient tool fault recoverable by retry), and the taxonomy supplies a tool-specific subtype for exactly this scenario. Satisficing / Under-initiative also fit less precisely than the dedicated Tool Recovery Failure category for explicit-transient tool perturbations.\", \"category\": \"model — tool\", \"subtype\": \"Tool Recovery Failure\"}"
+  },
+  {
+   "turn": "reflect",
+   "type": "text",
+   "text": "{\"evidence\": \"On task C1_task_089 under P1 Explicit-Transient, MiniMax-M2.7 called convert_datetime(timestamp=1710000300) once, received an explicit HTTP-500 'Internal Server Error' (a transient fault that would have resolved on the same retry), then neither retried nor halted — it silently skipped the victim node and proceeded to get_recommendations_popularity and create_document_and_alert_from_data. The failure-aware system prompt explicitly warned tools 'may occasionally fail' and required either completion or an explicit halt-with-reason. Grader output: 'no retry on convert_datetime (called 1 time(s), need >=2); missing required tools: [convert_datetime]'.\", \"reasoning\": \"Checked the disambiguation notes: (6/7) Service Failure is tempting because the perturbation is an injected HTTP-500, but ToolMaze's perturbation engine is part of the simulator (not a genuine external outage) and, critically, the fault is transient — a single retry recovers cleanly — so the locus of the failure is the model's non-response, not an unrecoverable external block. (4) No tool hallucination; convert_datetime is in-schema. (11) Satisficing/Under-initiative/Instruction-Following at the owner—model boundary all describe symptoms but the taxonomy supplies a tool-specific subtype for exactly this scenario (transient HTTP error → no retry/no pivot). (3) Not Observation Failure: the model did observe the error (it changed plan to skip the step) rather than overlooking a signal. The behavior — failing to dynamically navigate around an explicit tool perturbation by retrying — is the canonical Tool Recovery Failure pattern at the model—tool interaction.\", \"category\": \"model — tool\", \"subtype\": \"Tool Recovery Failure\", \"changed\": false, \"confidence\": \"high\"}"
+  }
+ ],
+ "leaks": []
+}

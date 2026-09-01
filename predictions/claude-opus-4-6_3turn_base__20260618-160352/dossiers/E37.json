@@ -1,0 +1,421 @@
+{
+ "id": "E37",
+ "gold": {
+  "edge": "env (external) — model",
+  "fault_side": "env",
+  "failure_mode": "Service Failure",
+  "vulnerability": "none"
+ },
+ "pred": {
+  "edge": "env (external) — model",
+  "fault_side": "env",
+  "failure_mode": "Service Failure",
+  "category": "env (external) — model (fault: env)"
+ },
+ "evidence": "The Anthropic API returned a 429 rate limit error mid-turn after tool calls completed. The error was logged internally ('isError=true error=⚠️ API rate limit reached') but the agent runner's post-run error guard in agent-runner-execution.ts only checked for context overflow errors, letting the rate limit fall through to return 'kind: success' with empty payloads — a completely silent response to the user.",
+ "reasoning": "Note #6 is directly on point: 'If the source genuinely failed (rate-limit, IP block, 503, timeout) it is Service Failure (env (external) — model, fault: env), even if a wrapper then masked it as a silent success (that masking is downstream, not the root). It is Mistranslation only in the reverse case — the source succeeded and the layer corrupted that good output.' Here the external source (Anthropic API) genuinely failed with a 429 rate limit. The wrapper's silent masking as 'success' is a downstream symptom, not the root cause. The Service Failure definition even uses the phrase 'unmapped rate limit,' which precisely describes this scenario — the rate limit was literally unmapped in the error-handling code. My prior classification of Mistranslation was wrong because that subtype requires the source to have succeeded and the integration layer to have corrupted a good result; here the source itself failed.",
+ "confidence": "high",
+ "changed": true,
+ "pre_reflection": {
+  "category": "model — tool (fault: tool)",
+  "failure_mode": "Mistranslation"
+ },
+ "dossier": "Now I have a comprehensive picture. Here is my detailed chronological account of the agent failure.\n\n---\n\n## Detailed Chronological Account of the Agent Failure\n\n### The Task / Setup\n\nThe agent under analysis is **Claude Opus 4.6** running as the embedded LLM within the **OpenClaw** framework (version 2026.3.3), serving users via Discord. The user was running a workload involving **5+ concurrent sub-agent sessions** (all using Opus) alongside a main session. The main session was given a conversational turn that required tool calls (e.g., `exec`, `read`).\n\n### Sequence of Events\n\n1. **User sends a message** in the main Discord session that triggers the agent to invoke tool calls as part of its reasoning turn.\n\n2. **Tool calls execute successfully.** The agent's tool invocations (exec, read, etc.) complete without error. The user can see the tool call results rendered in the Discord UI.\n\n3. **Post-tool-call LLM API request is made.** After the tool calls return, the OpenClaw agent runner makes a follow-up API call to Claude Opus 4.6 to generate the assistant's text response synthesizing the tool results. This is the standard agentic loop: tools run → results are fed back to the model → model generates a final text reply.\n\n4. **The API returns a 429 rate limit error.** Because the 5+ concurrent sub-agent Opus sessions had consumed the API quota, this follow-up LLM call is rejected with a rate limit error. The gateway logs record this clearly:\n   - `[agent/embedded] embedded run agent end: isError=true error=⚠️ API rate limit reached.`\n   - `[diagnostic] lane task error: lane=main error=\"FailoverError: ⚠️ API rate limit reached.\"`\n\n5. **The error is silently swallowed.** The error handling code in `src/auto-reply/reply/agent-runner-execution.ts` processes the embedded agent run result. The `finalEmbeddedError` is set (with `isError=true`) and the payloads are empty (no text was generated). However, the post-run error guard **only checks for context overflow errors** (a fix from earlier issue #26905). The rate limit error does not match `isContextOverflowError`, so it falls through all the error checks.\n\n6. **The code returns `kind: \"success\"` with no payload text.** Because the error was not caught, the execution path reaches the default return statement, which returns a \"success\" result with empty payloads. No text, no error message, nothing.\n\n7. **The user sees a completely silent/empty assistant turn.** In the Discord UI, the tool call results are visible, but there is no assistant text response following them. No error message is displayed. The conversation appears stuck/dead. The user has no indication that anything went wrong or that they should retry.\n\n### Key Signals and Feedback\n\n- **Error was logged internally** — the gateway logs clearly captured `isError=true` and the rate limit message, but this information never propagated to the user-facing response.\n- **The pre-tool-call error path worked correctly** — the code had a separate path (`\"Embedded agent failed before reply\"`) that properly handled rate limit errors when they occurred *before* any tool calls. The bug was specifically in the *mid-turn* path (after tool calls completed).\n- **The root cause was an incomplete error guard** — issue #26905 had previously added handling for context overflow errors in this code path, but only that specific error type was checked. Rate limit (`isRateLimitErrorMessage`) and overload (`isOverloadedErrorMessage`) errors were not included, despite the helper functions already being available in the `pi-embedded-helpers` module.\n\n### Aftermath: Attempted Fixes (None Merged)\n\nFour separate PRs were submitted within hours of the issue being filed (March 5, 2026), all targeting the same file:\n\n| PR | Author | Submitted | Outcome |\n|---|---|---|---|\n| #36143 | JaewookYou (issue reporter) | 12:55 UTC | Automated reviewers flagged issues (overload errors mislabeled as rate limit; missing post-turn flush cleanup). Auto-closed as stale on April 20. |\n| #36169 | Sid-Qin | 13:11 UTC | Closed by maintainer `thewilloftheshadow` on March 6. |\n| #36193 | RealKai42 | 13:28 UTC | Closed by maintainer `thewilloftheshadow` on March 6. |\n| #36206 | openperf | 13:37 UTC | Most comprehensive fix (added cleanup flush, bounded timeout, catch-all). Addressed all automated review feedback successfully. Closed by barnacle bot: \"author has more than 10 active PRs in this repo.\" |\n\n**None of the four PRs were merged.** The issue itself was marked stale on April 17 and auto-closed by the barnacle bot on April 22, 2026, with the status \"not planned.\" At least one additional PR (#47046) was later submitted referencing this issue, also closed.\n\n### Final Outcome\n\nThe bug — Claude Opus 4.6 producing a **completely silent, empty response** when a rate limit hits mid-turn after tool calls — was reported, diagnosed with a clear root cause, received multiple fix attempts (some with thorough review integration), but **was never resolved**. The issue was closed due to inactivity by an automated stale-bot, not because the underlying problem was fixed.",
+ "trajectory": [
+  {
+   "turn": "dossier",
+   "type": "thinking",
+   "text": "The user wants me to analyze an agent failure from a GitHub issue. Let me first try to fetch the issue from the given URL."
+  },
+  {
+   "turn": "dossier",
+   "type": "text",
+   "text": "I'll start by fetching the referenced GitHub issue to understand the agent failure."
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'gh api repos/openclaw/openclaw/issues/36142 2>&1 | head -100', 'description': 'Fetch GitHub issue #36142 from openclaw/openclaw'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebFetch",
+   "input": "{'url': 'https://github.com/openclaw/openclaw/issues/36142', 'prompt': 'Extract the full content of this GitHub issue including the title, body, all comments, timestamps, labels, and any referenced PRs or commits. Include every detail about what happened.'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "{\"url\":\"https://api.github.com/repos/openclaw/openclaw/issues/36142\",\"repository_url\":\"https://api.github.com/repos/openclaw/openclaw\",\"labels_url\":\"https://api.github.com/repos/openclaw/openclaw/issues/36142/labels{/name}\",\"comments_url\":\"https://api.github.com/repos/openclaw/openclaw/issues/36142/comments\",\"events_url\":\"https://api.github.com/repos/openclaw/openclaw/issues/36142/events\",\"html_url\":\"https://github.com/openclaw/openclaw/issues/36142\",\"id\":4028056836,\"node_id\":\"I_kwDOQb6kR87wF0UE\",\"number\":36142,\"title\":\"Silent empty response when LLM rate limit hits mid-turn (after tool calls)\",\"user\":{\"login\":\"JaewookYou\",\"id\":23391385,\"node_id\":\"MDQ6VXNlcjIzMzkxMzg1\",\"avatar_url\":\"https://avatars.githubusercontent.com/u/23391385?v=4\",\"gravatar_id\":\"\",\"url\":\"https://api.github.com/users/JaewookYou\",\"html_url\":\"https://github.com/JaewookYou\",\"followers_url\":\"https://api.github.com/users/JaewookYou/followers\",\"following_url\":\"https://api.github.com/users/JaewookYou/following{/other_user}\",\"gists_url\":\"https://api.github.com/users/JaewookYou/gists{/gist_id}\",\"starred_url\":\"https://api.github.com/users/JaewookYou/starred{/owner}{/repo}\",\"subscriptions_url\":\"https://api.github.com/users/JaewookYou/subscriptions\",\"organizations_url\":\"https://api.github.com/users/JaewookYou/orgs\",\"repos_url\":\"https://api.github.com/users/JaewookYou/repos\",\"events_url\":\"https://api.github.com/users/JaewookYou/events{/privacy}\",\"received_events_url\":\"https://api.github.com/users/JaewookYou/received_events\",\"type\":\"User\",\"user_view_type\":\"public\",\"site_admin\":false},\"labels\":[{\"id\":10174413390,\"node_id\":\"LA_kwDOQb6kR88AAAACXnE6Tg\",\"url\":\"https://api.github.com/repos/openclaw/openclaw/labels/stale\",\"name\":\"stale\",\"color\":\"F7E7A1\",\"default\":false,\"description\":\"Marked as stale due to inactivity\"}],\"state\":\"closed\",\"locked\":true,\"assignees\":[],\"milestone\":null,\"comments\":5,\"created_at\":\"2026-03-05T12:55:31Z\",\"updated_at\":\"2026-04-25T04:18:21Z\",\"closed_at\":\"2026-04-22T04:33:22Z\",\"assignee\":null,",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "# GitHub Issue #36142 Summary\n\n## Title\n**Silent empty response when LLM rate limit hits mid-turn (after tool calls)**\n\n## Metadata\n- **Author:** [JaewookYou](https://github.com/JaewookYou)\n- **Opened:** March 5, 2026\n- **Repository:** openclaw/openclaw (Public, 379k stars, 79.4k forks)\n- **Status:** Closed as not planned\n- **Labels:** `stale` (Marked as stale due to inactivity)\n- **Assignees:** None\n- **Milestone:** None\n- **Projects:** None\n- **Related PRs/Branches:** None linked in the Development section\n- **Referenced Issues:** #26905 (prior context-overflow fix)\n- **Comments:** No comments visible on the issue\n\n## Bug Description\n\nWhen the LLM API returns a 429 rate limit or overload error **after tool calls have already completed** during a turn, the assistant produces a completely empty/silent response. No error message appears, and the conversation looks stuck.\n\n## Reproduction Steps\n\nThe issue is triggered by running 5+ concurrent sub-agent sessions (e.g., Opus) that exhaust API rate limit quota. When the main session performs tool calls (exec, read, etc.) that succeed, but the subsequent LLM call to generate a text response from those tool results hits the rate limit, the result is an empty assistant turn with no error shown.\n\n## Root Cause\n\nLocated in `src/auto-reply/reply/agent-runner-execution.ts`. The post-run error handling only checks for context overflow errors (the #26905 fix). Rate limit/overload errors mid-turn are not caught — the run \"completes\" with an embedded error and empty payloads, returning `\"kind: \"success\"\"` with no text. The pre-tool-call error path handles rate limits correctly, but the mid-turn path does not.\n\n## Environment\n- OpenClaw version 2026.3.3\n- Model: anthropic/claude-opus-4-6\n- Trigger scenario: 5+ concurrent sub-agent sessions plus main session tool calls\n- Channel: Discord\n\n## Gateway Error Log Evidence\n\nThe logs show:\n- `\"[agent/embedded] embedded run agent end: isError=true error=⚠️ API rate limit reached.\"`\n- `\"[dia",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'gh api repos/openclaw/openclaw/issues/36142/comments 2>&1', 'description': 'Fetch comments on issue #36142'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'gh api repos/openclaw/openclaw/issues/36142/timeline --paginate 2>&1 | head -300', 'description': 'Fetch timeline events for issue #36142'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "[{\"url\":\"https://api.github.com/repos/openclaw/openclaw/issues/comments/4004967650\",\"html_url\":\"https://github.com/openclaw/openclaw/issues/36142#issuecomment-4004967650\",\"issue_url\":\"https://api.github.com/repos/openclaw/openclaw/issues/36142\",\"id\":4004967650,\"node_id\":\"IC_kwDOQb6kR87utvTi\",\"user\":{\"login\":\"Sid-Qin\",\"id\":201593046,\"node_id\":\"U_kgDODAQQ1g\",\"avatar_url\":\"https://avatars.githubusercontent.com/u/201593046?v=4\",\"gravatar_id\":\"\",\"url\":\"https://api.github.com/users/Sid-Qin\",\"html_url\":\"https://github.com/Sid-Qin\",\"followers_url\":\"https://api.github.com/users/Sid-Qin/followers\",\"following_url\":\"https://api.github.com/users/Sid-Qin/following{/other_user}\",\"gists_url\":\"https://api.github.com/users/Sid-Qin/gists{/gist_id}\",\"starred_url\":\"https://api.github.com/users/Sid-Qin/starred{/owner}{/repo}\",\"subscriptions_url\":\"https://api.github.com/users/Sid-Qin/subscriptions\",\"organizations_url\":\"https://api.github.com/users/Sid-Qin/orgs\",\"repos_url\":\"https://api.github.com/users/Sid-Qin/repos\",\"events_url\":\"https://api.github.com/users/Sid-Qin/events{/privacy}\",\"received_events_url\":\"https://api.github.com/users/Sid-Qin/received_events\",\"type\":\"User\",\"user_view_type\":\"public\",\"site_admin\":false},\"created_at\":\"2026-03-05T13:12:06Z\",\"updated_at\":\"2026-03-06T17:45:23Z\",\"body\":\"Submitted a fix in PR #36169. Extended the embedded-error guard in `agent-runner-execution.ts` to also recognize rate-limit (`isRateLimitErrorMessage`) and overload (`isOverloadedErrorMessage`) errors, surfacing an informative message to the user instead of silently returning an empty response.\",\"author_association\":\"CONTRIBUTOR\",\"pin\":null,\"reactions\":{\"url\":\"https://api.github.com/repos/openclaw/openclaw/issues/comments/4004967650/reactions\",\"total_count\":0,\"+1\":0,\"-1\":0,\"laugh\":0,\"hooray\":0,\"confused\":0,\"heart\":0,\"rocket\":0,\"eyes\":0},\"performed_via_github_app\":null},{\"url\":\"https://api.github.com/repos/openclaw/openclaw/issues/comments/4005065349\",\"html_url\":\"https://github.com/openclaw/openc",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "<persisted-output>\nOutput too large (82.7KB). Full output saved to: /workspace/.claude/projects/-tmp-taxjudge-m-rtpkks/628c49c4-9f14-4b07-8d24-039771eef69c/tool-results/b617urjw7.txt\n\nPreview (first 2KB):\n[{\"actor\":{\"login\":\"JaewookYou\",\"id\":23391385,\"node_id\":\"MDQ6VXNlcjIzMzkxMzg1\",\"avatar_url\":\"https://avatars.githubusercontent.com/u/23391385?v=4\",\"gravatar_id\":\"\",\"url\":\"https://api.github.com/users/JaewookYou\",\"html_url\":\"https://github.com/JaewookYou\",\"followers_url\":\"https://api.github.com/users/JaewookYou/followers\",\"following_url\":\"https://api.github.com/users/JaewookYou/following{/other_user}\",\"gists_url\":\"https://api.github.com/users/JaewookYou/gists{/gist_id}\",\"starred_url\":\"https://api.github.com/users/JaewookYou/starred{/owner}{/repo}\",\"subscriptions_url\":\"https://api.github.com/users/JaewookYou/subscriptions\",\"organizations_url\":\"https://api.github.com/users/JaewookYou/orgs\",\"repos_url\":\"https://api.github.com/users/JaewookYou/repos\",\"events_url\":\"https://api.github.com/users/JaewookYou/events{/privacy}\",\"received_events_url\":\"https://api.github.com/users/JaewookYou/received_events\",\"type\":\"User\",\"user_view_type\":\"public\",\"site_admin\":false},\"created_at\":\"2026-03-05T12:55:49Z\",\"updated_at\":\"2026-03-05T12:55:49Z\",\"source\":{\"type\":\"issue\",\"issue\":{\"url\":\"https://api.github.com/repos/openclaw/openclaw/issues/36143\",\"repository_url\":\"https://api.github.com/repos/openclaw/openclaw\",\"labels_url\":\"https://api.github.com/repos/openclaw/openclaw/issues/36143/labels{/name}\",\"comments_url\":\"https://api.github.com/repos/openclaw/openclaw/issues/36143/comments\",\"events_url\":\"https://api.github.com/repos/openclaw/openclaw/issues/36143/events\",\"html_url\":\"https://github.com/openclaw/openclaw/pull/36143\",\"id\":4028058380,\"node_id\":\"PR_kwDOQb6kR87IMRCN\",\"number\":36143,\"title\":\"fix: surface error message when LLM fails mid-turn after tool calls\",\"user\":{\"login\":\"JaewookYou\",\"id\":23391385,\"node_id\":\"MDQ6VXNlcjIzMzkxMzg1\",\"avatar_url\":\"https://avatars.githubuserconte",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "thinking",
+   "text": "Let me look at the referenced PRs to understand the full picture. The issue mentions PR #36143 by JaewookYou (the original reporter), as well as PRs #36169 (Sid-Qin), #36193 (RealKai42), and #36206 (openperf). Let me check these PRs."
+  },
+  {
+   "turn": "dossier",
+   "type": "text",
+   "text": "Let me check the referenced PRs to understand the full picture of what happened."
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"gh api repos/openclaw/openclaw/pulls/36143 --jq '{title, state, user: .user.login, created_at, merged_at, body, mergeable_state, merged_by: .merged_by.login}' 2>&1\", 'description': 'Fetch PR #36143 details'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"gh api repos/openclaw/openclaw/pulls/36169 --jq '{title, state, user: .user.login, created_at, merged_at, closed_at, body, merged_by: .merged_by.login}' 2>&1\", 'description': 'Fetch PR #36169 details'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"gh api repos/openclaw/openclaw/pulls/36193 --jq '{title, state, user: .user.login, created_at, merged_at, closed_at, body, merged_by: .merged_by.login}' 2>&1\", 'description': 'Fetch PR #36193 details'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"gh api repos/openclaw/openclaw/pulls/36206 --jq '{title, state, user: .user.login, created_at, merged_at, closed_at, body, merged_by: .merged_by.login}' 2>&1\", 'description': 'Fetch PR #36206 details'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "{\"body\":\"## Summary\\n\\nFixes #36142 — Silent empty response when LLM rate limit hits mid-turn after tool calls.\\n\\n## Problem\\n\\nWhen a rate limit, overload, or other API error occurs **after tool calls have already completed** (mid-turn), the agent run ends with an embedded error but no payload text. This resulted in a completely empty/silent assistant response — no error shown to the user.\\n\\nThe existing #26905 fix only handled context overflow errors in this path. Rate limit and other transient errors were not caught.\\n\\n## Changes\\n\\n**`src/auto-reply/reply/agent-runner-execution.ts`**:\\n- Import `isRateLimitErrorMessage` and `isOverloadedErrorMessage` from pi-embedded-helpers\\n- Extend the post-run embedded error guard to handle:\\n  1. Context overflow (existing behavior, unchanged)\\n  2. **Rate limit errors** → user-facing message about rate limit\\n  3. **Overloaded/capacity errors** → same treatment  \\n  4. **Generic fallback** → any embedded error with no payload text gets surfaced\\n\\nEach case returns a `kind: \\\"final\\\"` payload with an appropriate user-facing error message, matching the behavior of pre-tool-call errors which already surface properly via the \\\"Embedded agent failed before reply\\\" path.\\n\\n## Testing\\n\\n- Verified TypeScript compilation passes (no new type errors in our code)\\n- The fix is narrowly scoped: only fires when `finalEmbeddedError` exists AND `hasPayloadText` is false\\n- Existing context overflow behavior is preserved (same code path, same message)\\n\\n## Risk Assessment\\n\\n**Low risk** — This only adds error surfacing for cases that currently produce silent failures. No change to happy-path behavior.\",\"created_at\":\"2026-03-05T12:55:47Z\",\"mergeable_state\":\"unknown\",\"merged_at\":null,\"merged_by\":null,\"state\":\"closed\",\"title\":\"fix: surface error message when LLM fails mid-turn after tool calls\",\"user\":\"JaewookYou\"}",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "{\"body\":\"## Summary\\n\\n- **Problem:** When an LLM rate limit or overload error occurs mid-turn (after tool calls have already executed), the run completes with an embedded error and empty payloads. The existing code only checks for context-overflow errors, so rate-limit and overload errors fall through to `kind: \\\"success\\\"` with no text — the user sees nothing.\\n- **Why it matters:** Users lose trust when the assistant silently swallows errors after visible tool execution. They have no indication to retry.\\n- **What changed:** Extended the embedded-error guard in `agent-runner-execution.ts` to also recognize `isRateLimitErrorMessage` and `isOverloadedErrorMessage` (both already exported from `pi-embedded-helpers`) and return informative user-facing messages.\\n- **What did NOT change:** Context-overflow handling, the `kind: \\\"success\\\"` return path (still used for genuine success), failover logic, or any other error classification.\\n\\n## Change Type (select all)\\n\\n- [x] Bug fix\\n- [ ] Feature\\n- [ ] Refactor\\n- [ ] Docs\\n- [ ] Security hardening\\n- [ ] Chore/infra\\n\\n## Scope (select all touched areas)\\n\\n- [x] Gateway / orchestration\\n- [ ] Skills / tool execution\\n- [ ] Auth / tokens\\n- [ ] Memory / storage\\n- [ ] Integrations\\n- [ ] API / contracts\\n- [ ] UI / DX\\n- [ ] CI/CD / infra\\n\\n## Linked Issue/PR\\n\\n- Closes #36142\\n\\n## User-visible / Behavior Changes\\n\\n- When an LLM rate-limit error occurs mid-turn, the user now sees: \\\"⚠️ API rate limit reached mid-turn — the model couldn't generate a response after tool calls completed. Please try again in a moment.\\\"\\n- When an LLM overload error occurs mid-turn, the user now sees: \\\"⚠️ The AI service is temporarily overloaded. Please try again in a moment.\\\"\\n- Previously both cases returned an empty (silent) response.\\n\\n## Security Impact (required)\\n\\n- New permissions/capabilities? `No`\\n- Secrets/tokens handling changed? `No`\\n- New/changed network calls? `No`\\n- Command/tool execution surface changed? `No`\\",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "{\"body\":\"## Summary\\n\\nCloses #36142.\\n\\nWhen a rate limit (429) or overload error occurs **after tool calls have already completed**, the embedded agent run returns with `isError=true` but an empty payload. The existing guard only checked for context overflow errors (#26905), so rate limit / overload errors fell through and the function returned `kind: \\\"success\\\"` with no text — leaving the user with a completely silent, empty turn.\\n\\n**Fix:** Extend the post-run embedded error check to also catch `isRateLimitErrorMessage` / `isOverloadedErrorMessage` when there's no payload text, and return a user-facing `kind: \\\"final\\\"` response with an explanatory message.\\n\\n## Changes\\n\\n- `src/auto-reply/reply/agent-runner-execution.ts`: extend the post-loop embedded error guard to handle rate limit and overload embedded errors; import `isRateLimitErrorMessage` and `isOverloadedErrorMessage` from pi-embedded-helpers\\n\\n## Test plan\\n\\n- [x] `pnpm tsgo` — no TypeScript errors\\n- [x] `pnpm build` — clean build\\n- [ ] Live: trigger a rate limit mid-turn (after tool calls complete) and verify the error message is surfaced to the user\",\"closed_at\":\"2026-03-06T18:50:13Z\",\"created_at\":\"2026-03-05T13:28:39Z\",\"merged_at\":null,\"merged_by\":null,\"state\":\"closed\",\"title\":\"fix(agent): surface rate limit / overload embedded errors mid-turn\",\"user\":\"RealKai42\"}",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "{\"body\":\"### Summary\\r\\n\\r\\nThis PR fixes **[#36142](https://github.com/openclaw/openclaw/issues/36142 )**, where the assistant returns a silent, empty response if an LLM API error (like rate-limiting or overload) occurs mid-turn after tool calls have already completed.\\r\\n\\r\\nThe previous behavior provided no feedback to the user, making the conversation appear stuck. This fix extends the error handling established in [#26905](https://github.com/openclaw/openclaw/pull/26905 ) to gracefully manage these mid-turn failures.\\r\\n\\r\\n### Problem\\r\\n\\r\\nWhen a rate limit (429), overload, or other API error occurs after tool calls, the agent run terminates with an embedded error but no payload text. The existing error handling in `agent-runner-execution.ts` only checked for context overflow, causing other errors to be silently swallowed.\\r\\n\\r\\n### Solution\\r\\n\\r\\nThis solution enhances the post-run error handling in `src/auto-reply/reply/agent-runner-execution.ts` to provide a more robust and user-friendly experience:\\r\\n\\r\\n1.  **Differentiated Error Handling**: The code now specifically checks for rate-limit and overload errors in addition to the existing context overflow check, providing distinct, informative messages for each case.\\r\\n\\r\\n2.  **Robust Mid-Turn Cleanup**: For errors that occur mid-turn (i.e., after tool calls have been dispatched), this PR introduces a crucial cleanup step. Before returning the final error payload, it ensures the `blockReplyPipeline` is flushed and all `pendingToolTasks` are awaited. This guarantees that any partial results or tool outputs generated before the error are properly delivered and not lost, preventing potential race conditions and data inconsistencies.\\r\\n\\r\\n3.  **Generic Fallback**: A generic fallback handler has been added to catch any other embedded errors that occur mid-turn, ensuring that the agent never fails silently. The error message is sanitized for user safety.\\r\\n\\r\\n### Changes\\r\\n\\r\\n| File                   ",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "thinking",
+   "text": "Now I have a complete picture. Let me also check PR #36143 (the reporter's own PR) more closely, and look at the PR reviews/comments to understand what happened with all these PRs."
+  },
+  {
+   "turn": "dossier",
+   "type": "text",
+   "text": "Now let me check the PR reviews and comments to understand why all four PRs were closed without merging."
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'gh api repos/openclaw/openclaw/pulls/36143/comments 2>&1 | python3 -c \"import json,sys; data=json.load(sys.stdin); [print(f\\'{c[\\\\\"user\\\\\"][\\\\\"login\\\\\"]} ({c[\\\\\"created_at\\\\\"]}): {c[\\\\\"body\\\\\"][:500]}\\') for c in data]\" 2>&1', 'description': 'Fetch PR #36143 review comments'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'gh api repos/openclaw/openclaw/pulls/36143/reviews 2>&1 | python3 -c \"import json,sys; data=json.load(sys.stdin); [print(f\\'{r[\\\\\"user\\\\\"][\\\\\"login\\\\\"]} ({r[\\\\\"submitted_at\\\\\"]}): state={r[\\\\\"state\\\\\"]} body={r[\\\\\"body\\\\\"][:500]}\\') for r in data]\" 2>&1', 'description': 'Fetch PR #36143 reviews'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'gh api repos/openclaw/openclaw/issues/36143/comments 2>&1 | python3 -c \"import json,sys; data=json.load(sys.stdin); [print(f\\'{c[\\\\\"user\\\\\"][\\\\\"login\\\\\"]} ({c[\\\\\"created_at\\\\\"]}): {c[\\\\\"body\\\\\"][:800]}\\') for c in data]\" 2>&1', 'description': 'Fetch PR #36143 issue comments'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "greptile-apps[bot] (2026-03-05T12:57:59Z): **Overloaded errors mislabeled as rate limit errors**\n\n`isOverloadedErrorMessage` detects service-capacity/overload errors (e.g. \"overloaded\", \"529\"), which are distinct from rate limit errors (429). Both branches currently return the same message `\"API rate limit reached mid-turn\"`, which will mislead users whose requests failed because the service was overloaded — not because they hit a usage quota.\n\nThe codebase already maintains separate user-facing copy for these two cases in `errors.ts`:\n-\nchatgpt-codex-connector[bot] (2026-03-05T13:00:24Z): **<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Run post-turn flush before returning embedded-error fallback**\n\nReturning `kind: \"final\"` from this new `finalEmbeddedError && !hasPayloadText` branch skips the cleanup path in `src/auto-reply/reply/agent-runner.ts` (`runOutcome.kind === \"final\"` returns early at lines 361-363, so lines 400-405 never run). For the newly handled mid-turn rate-limit/overload cases (after tool calls), that means queued block rep",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "greptile-apps[bot] (2026-03-05T12:58:00Z): state=COMMENTED body=\nchatgpt-codex-connector[bot] (2026-03-05T13:00:24Z): state=COMMENTED body=\n### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `de5062a40b`\n    \n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](http://chatgpt.com/codex/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with 👍.\n\n\n\n\nCodex",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "greptile-apps[bot] (2026-03-05T12:57:55Z): <h3>Greptile Summary</h3>\n\nThis PR extends the embedded-error surfacing logic in `runAgentTurnWithFallback` to cover rate limit, overloaded, and generic errors that occur **mid-turn after tool calls**, fixing a silent empty-response bug (#36142). Previously only context overflow errors were caught in this path; all other embedded errors were swallowed.\n\n**Changes:**\n- Imports `isRateLimitErrorMessage` and `isOverloadedErrorMessage` from `pi-embedded-helpers`.\n- Restructures the post-run embedded error guard with separate branches for context overflow, rate limit/overloaded, and a generic fallback.\n- The generic fallback passes the error message through `sanitizeUserFacingText` before surfacing it.\n\n**Issue found:**\n- The `isRateLimitErrorMessage || isOverloadedErrorMessage` branch returns \nopenclaw-barnacle[bot] (2026-04-17T04:32:30Z): This pull request has been automatically marked as stale due to inactivity.\nPlease add updates or it will be closed.\nopenclaw-barnacle[bot] (2026-04-20T04:33:03Z): Closing due to inactivity.\nIf you believe this PR should be revived, post in #pr-thunderdome-dangerzone on Discord to talk to a maintainer.\nThat channel is the escape hatch for high-quality PRs that get auto-closed.",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'gh api repos/openclaw/openclaw/pulls/36206/comments 2>&1 | python3 -c \"import json,sys; data=json.load(sys.stdin); [print(f\\'{c[\\\\\"user\\\\\"][\\\\\"login\\\\\"]} ({c[\\\\\"created_at\\\\\"]}): {c[\\\\\"body\\\\\"][:500]}\\') for c in data]\" 2>&1', 'description': 'Fetch PR #36206 review comments'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'gh api repos/openclaw/openclaw/issues/36206/comments 2>&1 | python3 -c \"import json,sys; data=json.load(sys.stdin); [print(f\\'{c[\\\\\"user\\\\\"][\\\\\"login\\\\\"]} ({c[\\\\\"created_at\\\\\"]}): {c[\\\\\"body\\\\\"][:800]}\\') for c in data]\" 2>&1', 'description': 'Fetch PR #36206 issue comments'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "greptile-apps[bot] (2026-03-05T13:41:21Z): **Silent failure when embedded error has no message**\n\nThe generic fallback at line 665 guards on `if (errMsg)`, which is falsy for an empty string. If `finalEmbeddedError` is truthy but `finalEmbeddedError.message` is `undefined` or `\"\"`, the code runs the cleanup (flush + stop + await tool tasks) and then falls through all three guards without returning an error payload — ultimately hitting the `return { kind: \"success\", ... }` at the bottom of the function with no payload text. This is the ex\ngreptile-apps[bot] (2026-03-05T13:41:22Z): **Pipeline stopped before tool tasks are awaited**\n\n`params.blockReplyPipeline.stop()` is called at line 640 — which stops the coalescer — and then `pendingToolTasks` are awaited. While the current tool-task delivery path (`onToolResult`) doesn't enqueue directly into the pipeline, stopping the coalescer before the tasks complete means any future enqueue (e.g., from an intermediate callback added later) would bypass coalescing and write to `sendChain` without a subsequent `await sendChain` to dr\nchatgpt-codex-connector[bot] (2026-03-05T13:44:44Z): **<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  Bound wait for pending tool tasks before returning error**\n\nWaiting on `Promise.allSettled(params.pendingToolTasks)` here has no timeout, so a single stuck tool-delivery promise can block this mid-turn error path indefinitely and prevent the new fallback message from ever being sent. This is reachable when `onToolResult` awaits outbound delivery work that does not complete promptly (for example, routed sends)",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "greptile-apps[bot] (2026-03-05T13:41:16Z): <h3>Greptile Summary</h3>\n\nThis PR extends the post-run embedded-error handling in `agent-runner-execution.ts` to surface rate-limit (429), overload, and generic API errors that occur mid-turn (after tool calls), rather than silently returning an empty response. It also adds a pre-return cleanup step that flushes the `blockReplyPipeline` and awaits `pendingToolTasks` before yielding the error payload, so any tool outputs produced before the failure are delivered in order.\n\n**Key observations:**\n\n- **Logic gap — silent failure on empty error messages**: The new generic fallback is guarded by `if (errMsg)`, where `errMsg = finalEmbeddedError.message ?? \"\"`. If the embedded error object is present but carries no message string (or an empty one), all three guards (`isContextOverflowError`, `is\nopenperf (2026-03-05T14:17:00Z): All automated review suggestions have been addressed in the latest commit `92565d8`:\r\n\r\n1. **@greptile-apps — Pipeline stopped before tool tasks are awaited**: Moved `stop()` after `await Promise.allSettled(pendingToolTasks)` and switched to optional chaining (`params.blockReplyPipeline?.stop()`) outside the `if` block, following the \"deliver everything, then shut down\" pattern.\r\n\r\n2. **@greptile-apps — Silent failure when embedded error has no message**: Added an unconditional catch-all `return { kind: \"final\" }` at the end of the `if (finalEmbeddedError && !hasPayloadText)` block, so even an error with an empty or `undefined` message produces a user-visible notice.\r\n\r\n3. **@chatgpt-codex-connector — Bound wait for pending tool tasks before returning error**: Wrapped `Promise.allSettled(p\nchatgpt-codex-connector[bot] (2026-03-05T14:17:10Z): To use Codex here, [create a Codex account and connect to github](https://chatgpt.com/codex/settings/connectors).\ngreptile-apps[bot] (2026-03-05T14:17:41Z): Perfect! All three fixes are correctly implemented in commit `92565d8`:\n\n1. **Pipeline cleanup order** (lines 64",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "thinking",
+   "text": "Now I have a clear picture. Let me also check PR #36169 and #36193 to see why those were closed."
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'gh api repos/openclaw/openclaw/issues/36169/comments 2>&1 | python3 -c \"import json,sys; data=json.load(sys.stdin); [print(f\\'{c[\\\\\"user\\\\\"][\\\\\"login\\\\\"]} ({c[\\\\\"created_at\\\\\"]}): {c[\\\\\"body\\\\\"][:500]}\\') for c in data]\" 2>&1', 'description': 'Fetch PR #36169 issue comments'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'gh api repos/openclaw/openclaw/issues/36193/comments 2>&1 | python3 -c \"import json,sys; data=json.load(sys.stdin); [print(f\\'{c[\\\\\"user\\\\\"][\\\\\"login\\\\\"]} ({c[\\\\\"created_at\\\\\"]}): {c[\\\\\"body\\\\\"][:500]}\\') for c in data]\" 2>&1', 'description': 'Fetch PR #36193 issue comments'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "aisle-research-bot[bot] (2026-03-05T13:11:57Z): ## 🔒 Aisle Security Analysis\n\nWe found **1** potential security issue(s) in this PR:\n\n| # | Severity | Title |\n|---|----------|-------|\n| 1 | 🔵 Low | Media-only embedded agent responses can be discarded when surfacing embedded errors |\n\n\n---\n\n### 1. 🔵 Media-only embedded agent responses can be discarded when surfacing embedded errors\n\n| Property | Value |\n|----------|-------|\n| **Severity** | Low |\n| **CWE** | [CWE-670](https://cwe.mitre.org/data/definitions/670.html) |\n| **Location** | `src/aut\ngreptile-apps[bot] (2026-03-05T13:16:07Z): <h3>Greptile Summary</h3>\n\nThis PR fixes a silent error-response bug where LLM rate-limit and overload errors occurring mid-turn (after tool calls have executed) were not being surfaced to the user. The fix extends the existing embedded-error guard in `agent-runner-execution.ts` to detect these two new error types and return informative `kind: \"final\"` payloads rather than a silent `kind: \"success\"` with no text.\n\n**Key changes:**\n- The `if`-guard now checks `finalEmbeddedError && !hasPayloadTex",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "greptile-apps[bot] (2026-03-05T13:34:41Z): <h3>Greptile Summary</h3>\n\nThis PR fixes a silent empty-turn bug (#36142) where a 429 rate-limit or API overload error occurring **after tool calls had already completed** would cause the embedded agent run to return `isError=true` with no payload text. Because the existing guard only recognized context-overflow errors, all other error types fell through and produced a `kind: \"success\"` result with no text visible to the user.\n\n**What changed:**\n- `src/auto-reply/reply/agent-runner-execution.ts`",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'gh api repos/openclaw/openclaw/pulls/36169 --jq \\'{closed_at, merged_at, state}\\' 2>&1 && echo \"---\" && gh api repos/openclaw/openclaw/pulls/36193 --jq \\'{closed_at, merged_at, state}\\' 2>&1', 'description': 'Check merge/close status of PRs #36169 and #36193'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'gh api repos/openclaw/openclaw/issues/36169/comments 2>&1 | python3 -c \"\\nimport json,sys\\ndata=json.load(sys.stdin)\\nfor c in data:\\n    if \\'stale\\' in c[\\'body\\'].lower() or \\'closing\\' in c[\\'body\\'].lower() or \\'inactiv\\' in c[\\'body\\'].lower() or \\'bot\\' in c[\\'user\\'][\\'login\\'].lower():\\n        print(f\\'{c[\\\\\"user\\\\\"][\\\\\"login\\\\\"]} ({c[\\\\\"created_at\\\\\"]}): {c[\\\\\"body\\\\\"][:500]}\\')\\n\" 2>&1', 'description': 'Check for stale/closure bot comments on PR #36169'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "{\"closed_at\":\"2026-03-06T17:57:27Z\",\"merged_at\":null,\"state\":\"closed\"}\n---\n{\"closed_at\":\"2026-03-06T18:50:13Z\",\"merged_at\":null,\"state\":\"closed\"}",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "aisle-research-bot[bot] (2026-03-05T13:11:57Z): ## 🔒 Aisle Security Analysis\n\nWe found **1** potential security issue(s) in this PR:\n\n| # | Severity | Title |\n|---|----------|-------|\n| 1 | 🔵 Low | Media-only embedded agent responses can be discarded when surfacing embedded errors |\n\n\n---\n\n### 1. 🔵 Media-only embedded agent responses can be discarded when surfacing embedded errors\n\n| Property | Value |\n|----------|-------|\n| **Severity** | Low |\n| **CWE** | [CWE-670](https://cwe.mitre.org/data/definitions/670.html) |\n| **Location** | `src/aut\ngreptile-apps[bot] (2026-03-05T13:16:07Z): <h3>Greptile Summary</h3>\n\nThis PR fixes a silent error-response bug where LLM rate-limit and overload errors occurring mid-turn (after tool calls have executed) were not being surfaced to the user. The fix extends the existing embedded-error guard in `agent-runner-execution.ts` to detect these two new error types and return informative `kind: \"final\"` payloads rather than a silent `kind: \"success\"` with no text.\n\n**Key changes:**\n- The `if`-guard now checks `finalEmbeddedError && !hasPayloadTex",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "text",
+   "text": "Let me check why PRs #36169 and #36193 were specifically closed, and check the edit history of the Sid-Qin comment to understand the update."
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': '# Check all comments on PR #36169 for closure reasons\\ngh api repos/openclaw/openclaw/issues/36169/comments --paginate 2>&1 | python3 -c \"\\nimport json,sys\\ndata=json.load(sys.stdin)\\nfor c in data:\\n    login = c[\\'user\\'][\\'login\\']\\n    body = c[\\'body\\'][:600]\\n    created = c[\\'created_at\\']\\n    # Print all comments to see closure reason\\n    print(f\\'--- {login} ({created}) ---\\')\\n    print(body)\\n    print()\\n\" 2>&1', 'description': 'Get all comments on PR #36169 to find closure reason'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': '# Check all comments on PR #36193 for closure reasons\\ngh api repos/openclaw/openclaw/issues/36193/comments --paginate 2>&1 | python3 -c \"\\nimport json,sys\\ndata=json.load(sys.stdin)\\nfor c in data:\\n    login = c[\\'user\\'][\\'login\\']\\n    body = c[\\'body\\'][:600]\\n    created = c[\\'created_at\\']\\n    print(f\\'--- {login} ({created}) ---\\')\\n    print(body)\\n    print()\\n\" 2>&1', 'description': 'Get all comments on PR #36193 to find closure reason'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "--- aisle-research-bot[bot] (2026-03-05T13:11:57Z) ---\n## 🔒 Aisle Security Analysis\n\nWe found **1** potential security issue(s) in this PR:\n\n| # | Severity | Title |\n|---|----------|-------|\n| 1 | 🔵 Low | Media-only embedded agent responses can be discarded when surfacing embedded errors |\n\n\n---\n\n### 1. 🔵 Media-only embedded agent responses can be discarded when surfacing embedded errors\n\n| Property | Value |\n|----------|-------|\n| **Severity** | Low |\n| **CWE** | [CWE-670](https://cwe.mitre.org/data/definitions/670.html) |\n| **Location** | `src/auto-reply/reply/agent-runner-execution.ts:618-645` |\n\n#### Description\n\nIn `runAgentTurnWithFallback`,\n\n--- greptile-apps[bot] (2026-03-05T13:16:07Z) ---\n<h3>Greptile Summary</h3>\n\nThis PR fixes a silent error-response bug where LLM rate-limit and overload errors occurring mid-turn (after tool calls have executed) were not being surfaced to the user. The fix extends the existing embedded-error guard in `agent-runner-execution.ts` to detect these two new error types and return informative `kind: \"final\"` payloads rather than a silent `kind: \"success\"` with no text.\n\n**Key changes:**\n- The `if`-guard now checks `finalEmbeddedError && !hasPayloadText` first, then branches on error type (context overflow, rate limit, overload), mirroring the establ",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "--- greptile-apps[bot] (2026-03-05T13:34:41Z) ---\n<h3>Greptile Summary</h3>\n\nThis PR fixes a silent empty-turn bug (#36142) where a 429 rate-limit or API overload error occurring **after tool calls had already completed** would cause the embedded agent run to return `isError=true` with no payload text. Because the existing guard only recognized context-overflow errors, all other error types fell through and produced a `kind: \"success\"` result with no text visible to the user.\n\n**What changed:**\n- `src/auto-reply/reply/agent-runner-execution.ts`: The post-loop embedded-error guard is broadened (`finalEmbeddedError && !hasPayloadText` replaces",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': '# Check timeline events for PR #36169 to see who/what closed it\\ngh api repos/openclaw/openclaw/issues/36169/timeline --paginate 2>&1 | python3 -c \"\\nimport json,sys\\ndata=json.load(sys.stdin)\\nfor e in data:\\n    if e.get(\\'event\\') in (\\'closed\\', \\'referenced\\', \\'cross-referenced\\'):\\n        actor = e.get(\\'actor\\', {}).get(\\'login\\', \\'unknown\\') if e.get(\\'actor\\') else \\'unknown\\'\\n        print(f\\'Event: {e[\\\\\"event\\\\\"]} by {actor} at {e.get(\\\\\"created_at\\\\\", \\\\\"?\\\\\")}\\')\\n        if \\'source\\' in e:\\n            src = e[\\'source\\']\\n            if \\'issue\\' in src:\\n                print(f\\'  Source: {src[\\\\\"issue\\\\\"].get(\\\\\"title\\\\\", \\\\\"?\\\\\")} (#{src[\\\\\"issue\\\\\"].get(\\\\\"number\\\\\", \\\\\"?\\\\\")})\\')\\n\" 2>&1', 'description': 'Check timeline events for PR #36169 closure'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"# Check who closed PR #36169 \\ngh api repos/openclaw/openclaw/pulls/36169 --jq '{closed_by: .closed_by.login, user: .user.login, state_reason: .state_reason}' 2>&1\", 'description': 'Check who closed PR #36169'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Event: closed by thewilloftheshadow at 2026-03-06T17:57:27Z",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "{\"closed_by\":null,\"state_reason\":null,\"user\":\"Sid-Qin\"}",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': '# Check who closed PR #36193\\ngh api repos/openclaw/openclaw/issues/36193/timeline --paginate 2>&1 | python3 -c \"\\nimport json,sys\\ndata=json.load(sys.stdin)\\nfor e in data:\\n    if e.get(\\'event\\') in (\\'closed\\', \\'referenced\\'):\\n        actor = e.get(\\'actor\\', {}).get(\\'login\\', \\'unknown\\') if e.get(\\'actor\\') else \\'unknown\\'\\n        print(f\\'Event: {e[\\\\\"event\\\\\"]} by {actor} at {e.get(\\\\\"created_at\\\\\", \\\\\"?\\\\\")}\\')\\n\" 2>&1', 'description': 'Check timeline events for PR #36193 closure'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': '# Check who closed PR #36206\\ngh api repos/openclaw/openclaw/issues/36206/timeline --paginate 2>&1 | python3 -c \"\\nimport json,sys\\ndata=json.load(sys.stdin)\\nfor e in data:\\n    if e.get(\\'event\\') in (\\'closed\\', \\'referenced\\'):\\n        actor = e.get(\\'actor\\', {}).get(\\'login\\', \\'unknown\\') if e.get(\\'actor\\') else \\'unknown\\'\\n        print(f\\'Event: {e[\\\\\"event\\\\\"]} by {actor} at {e.get(\\\\\"created_at\\\\\", \\\\\"?\\\\\")}\\')\\n\" 2>&1', 'description': 'Check timeline events for PR #36206 closure'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Event: closed by thewilloftheshadow at 2026-03-06T18:50:13Z",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Event: closed by openclaw-barnacle[bot] at 2026-03-06T19:01:06Z",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': '# Check if thewilloftheshadow left any comment when closing\\ngh api repos/openclaw/openclaw/issues/36169/timeline --paginate 2>&1 | python3 -c \"\\nimport json,sys\\ndata=json.load(sys.stdin)\\nfor e in data:\\n    if e.get(\\'event\\') == \\'commented\\':\\n        login = e.get(\\'actor\\', {}).get(\\'login\\', e.get(\\'user\\',{}).get(\\'login\\',\\'?\\'))\\n        body = e.get(\\'body\\', \\'\\')[:500]\\n        print(f\\'{login} ({e.get(\\\\\"created_at\\\\\",\\\\\"?\\\\\")}): {body}\\')\\n        print()\\n\" 2>&1', 'description': 'Check for closing comments on PR #36169'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"# Check the Sid-Qin comment edit that was updated on 2026-03-06T17:45:23Z\\n# The comment on the issue was updated - let me check the comment body now\\ngh api repos/openclaw/openclaw/issues/comments/4004967650 --jq '.body' 2>&1\", 'description': 'Check updated comment body from Sid-Qin'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "aisle-research-bot[bot] (2026-03-05T13:11:57Z): ## 🔒 Aisle Security Analysis\n\nWe found **1** potential security issue(s) in this PR:\n\n| # | Severity | Title |\n|---|----------|-------|\n| 1 | 🔵 Low | Media-only embedded agent responses can be discarded when surfacing embedded errors |\n\n\n---\n\n### 1. 🔵 Media-only embedded agent responses can be discarded when surfacing embedded errors\n\n| Property | Value |\n|----------|-------|\n| **Severity** | Low |\n| **CWE** | [CWE-670](https://cwe.mitre.org/data/definitions/670.html) |\n| **Location** | `src/aut\n\ngreptile-apps[bot] (2026-03-05T13:16:07Z): <h3>Greptile Summary</h3>\n\nThis PR fixes a silent error-response bug where LLM rate-limit and overload errors occurring mid-turn (after tool calls have executed) were not being surfaced to the user. The fix extends the existing embedded-error guard in `agent-runner-execution.ts` to detect these two new error types and return informative `kind: \"final\"` payloads rather than a silent `kind: \"success\"` with no text.\n\n**Key changes:**\n- The `if`-guard now checks `finalEmbeddedError && !hasPayloadTex",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Submitted a fix in PR #36169. Extended the embedded-error guard in `agent-runner-execution.ts` to also recognize rate-limit (`isRateLimitErrorMessage`) and overload (`isOverloadedErrorMessage`) errors, surfacing an informative message to the user instead of silently returning an empty response.",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"# Check if openperf is actually a bot/agent\\ngh api users/openperf --jq '{login, type, bio, name, company}' 2>&1\", 'description': 'Check openperf user profile'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': '# Check if there\\'s a note about duplicate PRs or the maintainer\\'s decision\\ngh api repos/openclaw/openclaw/issues/36142/timeline --paginate 2>&1 | python3 -c \"\\nimport json,sys\\ndata=json.load(sys.stdin)\\nfor e in data:\\n    evtype = e.get(\\'event\\', \\'?\\')\\n    if evtype in (\\'cross-referenced\\', \\'referenced\\'):\\n        src = e.get(\\'source\\', {})\\n        if \\'issue\\' in src:\\n            print(f\\'Event: {evtype} -> #{src[\\\\\"issue\\\\\"][\\\\\"number\\\\\"]} \\\\\"{src[\\\\\"issue\\\\\"][\\\\\"title\\\\\"]}\\\\\" by {src[\\\\\"issue\\\\\"][\\\\\"user\\\\\"][\\\\\"login\\\\\"]} (state: {src[\\\\\"issue\\\\\"][\\\\\"state\\\\\"]})\\')\\n    elif evtype in (\\'closed\\', \\'labeled\\'):\\n        actor = e.get(\\'actor\\', {}).get(\\'login\\', \\'?\\')\\n        label = e.get(\\'label\\', {}).get(\\'name\\', \\'\\')\\n        print(f\\'Event: {evtype} by {actor} {label} at {e.get(\\\\\"created_at\\\\\",\\\\\"?\\\\\")}\\')\\n\" 2>&1', 'description': 'Check cross-references and events on the issue'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "{\"bio\":\"Keep imagining what's possible — have the courage to release an answer that once served you well.\\r\\n\\r\\n\\r\\nWeChat: huhurun2022\",\"company\":null,\"login\":\"openperf\",\"name\":\"Chunyue Wang\",\"type\":\"User\"}",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Event: cross-referenced -> #36143 \"fix: surface error message when LLM fails mid-turn after tool calls\" by JaewookYou (state: closed)\nEvent: cross-referenced -> #36206 \"fix(auto-reply): surface rate-limit and overload errors mid-turn with post-turn flush\" by openperf (state: closed)\nEvent: cross-referenced -> #47046 \"fix: surface rate limit errors mid-turn instead of silent empty response (closes #36142)\" by Br1an67 (state: closed)\nEvent: cross-referenced -> #55451 \"Surface raw provider errors in UI/logs when OpenClaw rewrites assistant error text\" by kevinheneveld (state: closed)\nEvent: labeled by openclaw-barnacle[bot] stale at 2026-04-17T04:32:29Z\nEvent: closed by openclaw-barnacle[bot]  at 2026-04-22T04:33:22Z",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "thinking",
+   "text": "Now I have a comprehensive picture. Let me now understand what happened with PR #36206 by openperf, since it was the most comprehensive fix. It was closed by the barnacle bot because \"the author has more than 10 active PRs in this repo.\"\n\nLet me also check how many PRs openperf had open at the time, and whether they were all agent-generated.\n\nLet me also understand the agent failure here. The \"agent under analysis\" is \"Claude Opus 4.6 (OpenClaw)\". So this is about the OpenClaw agent (which uses Claude Opus 4.6) and its behavior. \n\nThe core issue is that when the OpenClaw agent system completes tool calls but then hits a rate limit on the subsequent LLM API call needed to generate a text response, it returns a completely empty response with no error indication to the user. Looking at the actual failure pattern, the issue seems to be that when the agent hit the rate limit after completing its tool calls, the error handling didn't gracefully surface the problem to the user—instead it just produced silence. The openperf PR situation with multiple active submissions suggests this might be an automated agent generating those changes, which adds another layer to understanding what went wrong in the OpenClaw system when resource constraints kicked in. Four separate PRs were submitted to address this, but none made it through: the first was auto-closed as stale, two were closed by maintainers on the same day, and the fourth had positive feedback but was rejected by automation due to the author's PR limit. The issue itself was eventually marked stale and not planned. Now I'm considering what \"agent failure\" really means here—is it the OpenClaw agent's inability to handle rate limits gracefully, or is it the failure of the human contributors trying to fix it?\n\nGiven that the analysis focuses on Claude Opus 4.6 running within OpenClaw, I think the core failure is the model hitting a rate limit mid-turn and producing a silent empty response instead of communicating the error bac"
+  },
+  {
+   "turn": "dossier",
+   "type": "text",
+   "text": "Now I have a comprehensive picture. Here is my detailed chronological account of the agent failure.\n\n---\n\n## Detailed Chronological Account of the Agent Failure\n\n### The Task / Setup\n\nThe agent under analysis is **Claude Opus 4.6** running as the embedded LLM within the **OpenClaw** framework (version 2026.3.3), serving users via Discord. The user was running a workload involving **5+ concurrent sub-agent sessions** (all using Opus) alongside a main session. The main session was given a conversational turn that required tool calls (e.g., `exec`, `read`).\n\n### Sequence of Events\n\n1. **User sends a message** in the main Discord session that triggers the agent to invoke tool calls as part of its reasoning turn.\n\n2. **Tool calls execute successfully.** The agent's tool invocations (exec, read, etc.) complete without error. The user can see the tool call results rendered in the Discord UI.\n\n3. **Post-tool-call LLM API request is made.** After the tool calls return, the OpenClaw agent runner makes a follow-up API call to Claude Opus 4.6 to generate the assistant's text response synthesizing the tool results. This is the standard agentic loop: tools run → results are fed back to the model → model generates a final text reply.\n\n4. **The API returns a 429 rate limit error.** Because the 5+ concurrent sub-agent Opus sessions had consumed the API quota, this follow-up LLM call is rejected with a rate limit error. The gateway logs record this clearly:\n   - `[agent/embedded] embedded run agent end: isError=true error=⚠️ API rate limit reached.`\n   - `[diagnostic] lane task error: lane=main error=\"FailoverError: ⚠️ API rate limit reached.\"`\n\n5. **The error is silently swallowed.** The error handling code in `src/auto-reply/reply/agent-runner-execution.ts` processes the embedded agent run result. The `finalEmbeddedError` is set (with `isError=true`) and the payloads are empty (no text was generated). However, the post-run error guard **only checks for context overflow errors** (a fix from earlier issue #26905). The rate limit error does not match `isContextOverflowError`, so it falls through all the error checks.\n\n6. **The code returns `kind: \"success\"` with no payload text.** Because the error was not caught, the execution path reaches the default return statement, which returns a \"success\" result with empty payloads. No text, no error message, nothing.\n\n7. **The user sees a completely silent/empty assistant turn.** In the Discord UI, the tool call results are visible, but there is no assistant text response following them. No error message is displayed. The conversation appears stuck/dead. The user has no indication that anything went wrong or that they should retry.\n\n### Key Signals and Feedback\n\n- **Error was logged internally** — the gateway logs clearly captured `isError=true` and the rate limit message, but this information never propagated to the user-facing response.\n- **The pre-tool-call error path worked correctly** — the code had a separate path (`\"Embedded agent failed before reply\"`) that properly handled rate limit errors when they occurred *before* any tool calls. The bug was specifically in the *mid-turn* path (after tool calls completed).\n- **The root cause was an incomplete error guard** — issue #26905 had previously added handling for context overflow errors in this code path, but only that specific error type was checked. Rate limit (`isRateLimitErrorMessage`) and overload (`isOverloadedErrorMessage`) errors were not included, despite the helper functions already being available in the `pi-embedded-helpers` module.\n\n### Aftermath: Attempted Fixes (None Merged)\n\nFour separate PRs were submitted within hours of the issue being filed (March 5, 2026), all targeting the same file:\n\n| PR | Author | Submitted | Outcome |\n|---|---|---|---|\n| #36143 | JaewookYou (issue reporter) | 12:55 UTC | Automated reviewers flagged issues (overload errors mislabeled as rate limit; missing post-turn flush cleanup). Auto-closed as stale on Apr"
+  },
+  {
+   "turn": "judge",
+   "type": "thinking",
+   "text": "Let me analyze the failure carefully.\n\nThe core failure: Claude Opus 4.6 running within OpenClaw completed tool calls successfully, then hit a 429 rate limit error on the follow-up LLM API call. The error was logged internally but the agent framework's code in `agent-runner-execution.ts` only checked for context overflow errors in the post-tool-call error path. The rate limit error fell through, and the code returned `kind: \"success\"` with empty payloads, resulting in a completely silent/empty response to the user.\n\nSo what's the root cause? Let me think about this:\n1. The external LLM API returned a 429 rate limit — this is the environmental trigger\n2. The tool integration layer in `agent-runner-execution.ts` failed to properly handle this error — it only looked for context overflow, not rate limits\n3. The agent had no recovery mechanism for this specific failure mode\n\nThe real issue is in the framework code itself. Claude Opus didn't fail — the OpenClaw agent runner's error handling did. This fits `model — tool` → `Mistranslation`: the framework layer received correct error information from the environment but failed to faithfully translate it, returning success when it should have surfaced the rate limit error. The integration layer is the culprit here - it received the rate limit error correctly but failed to surface it as a user-facing message, instead returning success with empty payloads. This is a classic mistranslation at the boundary between model and environment: the error guard only handled context overflow errors, letting rate limits silently pass through as success. the middleware layer failed to faithfully convey the error from the environment to the user. The API correctly returned a 429 rate limit error, but the integration layer swallowed that error and presented it as a silent success instead—this is exactly the `Mistranslation` pattern where information gets garbled on the way in before reaching the user."
+  },
+  {
+   "turn": "judge",
+   "type": "text",
+   "text": "{\"evidence\": \"When the Anthropic API returned a 429 rate limit error after tool calls completed mid-turn, the OpenClaw agent runner code in agent-runner-execution.ts received the error correctly (logging 'isError=true error=⚠️ API rate limit reached'), but its post-run error guard only checked for context overflow errors (from earlier fix #26905). The rate limit error fell through all guards, and the code returned 'kind: success' with empty payloads — delivering a completely silent, empty response to the user instead of surfacing the error.\", \"reasoning\": \"The external API correctly signaled a rate limit (429), and the model itself had no opportunity to reason incorrectly — it was never invoked on the follow-up call. The defect lies squarely in the integration/middleware layer (agent-runner-execution.ts), which sits between the model↔environment boundary: it faithfully received the error internally but unfaithfully translated it into a silent 'success' with no payload. This is not a Service Failure (the API behaved correctly by returning 429), nor a Recovery Failure (the model never got a chance to recover — the framework intercepted). It is a Mistranslation: the wrapper code garbled the observation on the way in, converting a clear error signal into a false success status before it could ever reach the user or the model.\", \"category\": \"model — tool\", \"subtype\": \"Mistranslation\"}"
+  },
+  {
+   "turn": "reflect",
+   "type": "thinking",
+   "text": "Let me carefully re-examine my classification against the checklist, especially note #6 which directly addresses my case.\n\n**Note #6: Service Failure vs Mistranslation.**\n\"If the source genuinely failed (rate-limit, IP block, 503, timeout) it is Service Failure (env (external) — model, fault: env), even if a wrapper then masked it as a silent 'success' (that masking is downstream, not the root). It is Mistranslation (model — tool, fault: tool) only in the reverse case — the source succeeded and the layer corrupted that good output.\"\nThe external Anthropic API returned a 429 rate limit error, which is a genuine source failure. The wrapper code then masked this as a silent success with empty payloads, but per the taxonomy's explicit guidance, that masking is downstream and not the root cause. This should be classified as Service Failure under `env (external) — model` with fault: env. The rate limit error wasn't handled in the code, so it terminated the request without recovery. I need to reclassify this as a Service Failure from an external environment rather than a model mistranslation issue."
+  },
+  {
+   "turn": "reflect",
+   "type": "text",
+   "text": "{\"evidence\": \"The Anthropic API returned a 429 rate limit error mid-turn after tool calls completed. The error was logged internally ('isError=true error=⚠️ API rate limit reached') but the agent runner's post-run error guard in agent-runner-execution.ts only checked for context overflow errors, letting the rate limit fall through to return 'kind: success' with empty payloads — a completely silent response to the user.\", \"reasoning\": \"Note #6 is directly on point: 'If the source genuinely failed (rate-limit, IP block, 503, timeout) it is Service Failure (env (external) — model, fault: env), even if a wrapper then masked it as a silent success (that masking is downstream, not the root). It is Mistranslation only in the reverse case — the source succeeded and the layer corrupted that good output.' Here the external source (Anthropic API) genuinely failed with a 429 rate limit. The wrapper's silent masking as 'success' is a downstream symptom, not the root cause. The Service Failure definition even uses the phrase 'unmapped rate limit,' which precisely describes this scenario — the rate limit was literally unmapped in the error-handling code. My prior classification of Mistranslation was wrong because that subtype requires the source to have succeeded and the integration layer to have corrupted a good result; here the source itself failed.\", \"category\": \"env (external) — model\", \"subtype\": \"Service Failure\", \"changed\": true, \"confidence\": \"high\"}"
+  }
+ ],
+ "leaks": []
+}

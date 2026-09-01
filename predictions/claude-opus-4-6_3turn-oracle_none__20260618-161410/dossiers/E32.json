@@ -1,0 +1,450 @@
+{
+ "id": "E32",
+ "gold": {
+  "edge": "model — tool",
+  "fault_side": "model",
+  "failure_mode": "Tool Recovery Failure",
+  "vulnerability": "none"
+ },
+ "oracle_edge": "model — tool",
+ "pred": {
+  "edge": "model — tool",
+  "fault_side": "model",
+  "failure_mode": "Tool Recovery Failure",
+  "category": "model — tool (fault: model)"
+ },
+ "evidence": "MiniMax-M2.7 called convert_datetime once, received a clear 500 InternalServerError response, and instead of retrying the tool (which would have succeeded on the second attempt, since the fault was transient), the agent abandoned convert_datetime entirely and moved on to downstream tools, leaving the pipeline incomplete. The judge verdict confirms: 'no retry on convert_datetime (called 1 time(s), need >=2).'",
+ "reasoning": "The agent received an explicit, machine-readable error signal (HTTP 500) from the tool and failed to act on it appropriately. This is not Tool Feedback Neglect, which describes ignoring information *within* a tool's successful response to pursue an unrelated plan. Here, the model recognized the tool failed but did not attempt the trivially correct recovery action (a simple retry on a transient error). Tool Recovery Failure specifically covers the scenario where a tool encounters an explicit failure (e.g., HTTP 503, rate-limit timeout) and the model fails to dynamically navigate around the anomaly — neither retrying nor pivoting. MiniMax-M2.7 neither retried nor sought an alternative; it simply gave up after one failed call, which is the hallmark of Tool Recovery Failure.",
+ "dossier": "Now I have all the critical information needed. Let me compile the detailed chronological account of the agent failure.\n\n---\n\n## Detailed Chronological Account of the MiniMax-M2.7 Failure on ToolMaze Task C1_task_089 (C1/P1 — Explicit-Transient)\n\n### Source Material\n\nThe failure is documented in **Figure 7** of the paper \"When Tools Fail: Benchmarking Dynamic Replanning and Anomaly Recovery in LLM Agents\" (arXiv:2606.05806, Zhu et al., June 2026), which introduces the **ToolMaze** benchmark. The case study in Appendix E contrasts a **successful** model (Claude-Sonnet-4-6) against the **failing** model (MiniMax-M2.7) on the identical task and perturbation.\n\n---\n\n### The Task (C1_task_089)\n\nThe agent was given a natural-language shopping/general-domain request:\n\n> *\"Hi, for user_123, please reserve 1 black Sony XM5 for me using product_id p_sony_xm5_blk. The title is Untitled and the data is test. After you place the hold, please prepare the checkout from that reservation and let me know exactly when the reservation expires. Then suggest some popular alternatives in the same category, and send me an in-app notification with all the details.\"*\n\nThis is a **C1 (linear) complexity** task — a single-path DAG with no alternative tools. The expected tool-call chain is strictly sequential, with five tools in order:\n\n1. **`hold_inventory`** — Reserve the product (returns reservation_id `RESV-14729548`, expiry_time `1710000300` as a Unix timestamp, total_price $399.00)\n2. **`build_checkout_from_hold`** — Prepare checkout from the reservation hold data\n3. **`convert_datetime`** — Convert the Unix timestamp `1710000300` to a human-readable expiry time (`\"2024-03-09 16:05\"`)\n4. **`get_recommendations_popularity`** — Fetch popular alternatives in the same category\n5. **`create_document_and_alert_from_data`** — Send an in-app notification with details\n\n### The Perturbation (P1 — Explicit-Transient)\n\nThe perturbation mode is **P1**: **explicit** (a machine-readable error) and **transient** (resolves on retry). The perturbation point is index 2 in the chain — the **`convert_datetime`** tool is the designated \"victim.\"\n\nConcretely, when the agent first calls `convert_datetime(timestamp=1710000300)`, the ToolMaze Runtime Perturbation Engine intercepts the call and returns a synthetic error response:\n\n```json\n{\"error\": \"Internal Server Error\"}\n```\nwith status `\"error\"` and error_message `\"500 InternalServerError\"`. This is a clear, unambiguous HTTP 500 error — the agent receives an explicit signal that the tool call failed.\n\nBecause the perturbation is **transient**, any subsequent retry of `convert_datetime` with the same arguments would succeed normally, returning the correct output:\n```json\n{\"original_timestamp\": 1710000300, \"formatted_time\": \"2024-03-09 16:05\"}\n```\n\nThe expected recovery behavior is straightforward: detect the error, retry the same tool call, get the correct result, and continue the pipeline.\n\n---\n\n### What the Successful Agent Did (Claude-Sonnet-4-6)\n\nFor contrast, Claude-Sonnet-4-6 handled the perturbation correctly. Its execution trace, as shown in the green \"Success\" panel of Figure 7:\n\n1. Called `hold_inventory` → success\n2. Called `build_checkout_from_hold` → success\n3. Called `convert_datetime` → received the **500 InternalServerError** (perturbation hit)\n4. **Retried** `convert_datetime` with the same arguments → received the correct `\"2024-03-09 16:05\"` result\n5. Called `get_recommendations_popularity` → success\n6. Called `create_document_and_alert_from_data` → success\n\nThe judge verdict: **PASS** — \"All 5 steps completed successfully. Here is a clean summary: — Reservation - Reservation ID: RESV-14729548 - Product: Sony WH-1000XM5 (Black) — p_sony_xm5_blk - Quantity: 1 - Total Price: $399...\"\n\n---\n\n### What MiniMax-M2.7 Actually Did (The Failure)\n\nMiniMax-M2.7's execution trace, as shown in the red \"Failure\" panel of Figure 7, reveals the following sequence:\n\n1. **Called `hold_inventory`** → success (received reservation data including `expiry_time: 1710000300`)\n2. **Called `build_checkout_from_hold`** → success (received checkout confirmation)\n3. **Called `convert_datetime`** with `timestamp=1710000300` → received the **500 InternalServerError** perturbation. The tool returned `{\"error\": \"Internal Server Error\"}` with status `\"error\"`.\n4. **Did NOT retry `convert_datetime`.** Instead of retrying the failed tool, MiniMax-M2.7 moved on to the next tool in the pipeline.\n5. **Called `create_document_and_alert_from_data`** → This call appears in the execution trace (the agent attempted to continue the pipeline despite the missing datetime conversion).\n6. **Called `get_recommendations_popularity`** → The agent also called this tool, but the overall pipeline was left incomplete because the critical `convert_datetime` result was never obtained.\n\nThe key observable fact from Figure 7 is that MiniMax-M2.7's execution flow shows: `hold_inventory` → `build_checkout_from_hold` → `convert_datetime` (perturbed, error) → `create_document_and_alert_from_data` → `get_recommendations_popularity`. The agent called `convert_datetime` exactly **once**, received the error, and then simply skipped past it — proceeding to downstream tools without ever obtaining the formatted expiry time.\n\n---\n\n### The Judge Verdict\n\nThe ToolMaze evaluator returned: **FAIL**\n\nThe failure message reads: *\"P1 failed: no retry on 'convert_datetime' (called 1 time(s), need >=2); 'convert_datetime' never succeeded after retries; missing required tools: ['convert_datetime']\"*\n\nThis verdict captures three specific failures:\n- **No retry**: `convert_datetime` was called only 1 time; the P1 (transient) recovery strategy requires at least 2 calls (the initial failed attempt plus a retry).\n- **Never succeeded**: Because no retry occurred, the tool never produced a valid output.\n- **Missing required tool**: The pipeline was left without a successful `convert_datetime` invocation, so the downstream pipeline was incomplete — the user never received the human-readable reservation expiry time.\n\n---\n\n### Aggregate Context\n\nThis single-task failure is consistent with MiniMax-M2.7's broader performance on the benchmark. From Table 2, MiniMax-M2.7 scored:\n- **TSR at C1/P1**: 37% (w/o hint), 47% (w/ hint) — meaning it failed the majority of even the simplest explicit-transient tasks\n- **PRR at C1/P1**: 50.57% (w/o hint), 72.83% (w/ hint) — roughly half the time it encountered an explicit transient error, it failed to recover\n- **RC at C1/P1**: 45.20% (w/o hint), indicating substantial wasted effort even on tasks where it did encounter the perturbation\n- **Composite score (Avg.)**: 25.03% (w/o hint), the lowest among all evaluated models\n\nThe task ran in a sandboxed environment with a maximum of 25 agent steps, temperature 1, and max tokens 16,000. MiniMax-M2.7 was evaluated using a custom harness (listed in the paper's evaluation framework alongside OpenAI, Anthropic, and VLLM agent backends). The standard tool-use prompt (Table 5) instructed the agent: \"You are an autonomous AI assistant that executes tool-based workflows... You must complete ALL of them — do NOT skip any sub-tasks.\" It did **not** hint at the possibility of tool failures (that was the \"w/o hint\" condition).\n\n---\n\n### Summary of Observable Events\n\n| Step | Action | Outcome |\n|------|--------|---------|\n| 1 | Agent calls `hold_inventory` | Success — reservation created |\n| 2 | Agent calls `build_checkout_from_hold` | Success — checkout prepared |\n| 3 | Agent calls `convert_datetime(timestamp=1710000300)` | **Error** — `500 InternalServerError` returned by perturbation engine |\n| 4 | Agent does **not** retry `convert_datetime` | Skips to next tool |\n| 5 | Agent calls `create_document_and_alert_from_data` | Executes, but without the datetime result |\n| 6 | Agent calls `get_recommendations_popularity` | Executes |\n| — | **Final verdict** | **FAIL** — `convert_datetime` called only once, never succeeded, pipeline incomplete |\n\nThe agent received a clear, machine-readable error signal (HTTP 500) on a transient fault that would have resolved with a simple retry, but it abandoned the failing tool after a single attempt and continued downstream, leaving the task pipeline incomplete.",
+ "trajectory": [
+  {
+   "turn": "dossier",
+   "type": "thinking",
+   "text": "The user wants me to analyze an agent failure from a specific reference: ToolMaze — App.~E, Fig.~7 — task C1_task_089. Let me first search for information about ToolMaze, which appears to be a benchmark or paper about agent failures.\n\nLet me start by searching for the ToolMaze paper and the specific task mentioned."
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebSearch",
+   "input": "{'query': 'ToolMaze benchmark paper C1_task_089 agent failure explicit-transient'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebSearch",
+   "input": "{'query': 'ToolMaze paper appendix E figure 7 convert_datetime victim tool'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Web search results for query: \"ToolMaze benchmark paper C1_task_089 agent failure explicit-transient\"\n\nLinks: [{\"title\":\"Terminal-Bench: Benchmarking Agents on Hard, Realistic Tasks in Command Line Interfaces\",\"url\":\"https://arxiv.org/html/2601.11868\"},{\"title\":\"Strained Coherence: A Pre-Failure Signal in Coding Agent Execution Trajectories\",\"url\":\"https://arxiv.org/html/2606.07889\"},{\"title\":\"ACE-Bench: Agent Configurable Evaluation with Scalable Horizons and Controllable Difficulty under Lightweight Environments\",\"url\":\"https://arxiv.org/pdf/2604.06111\"},{\"title\":\"[2509.25370] Where LLM Agents Fail and How They can Learn From Failures\",\"url\":\"https://arxiv.org/abs/2509.25370\"},{\"title\":\"Visualization in a modular software system\",\"url\":\"https://image-ppubs.uspto.gov/dirsearch-public/print/downloadPdf/6266805\"},{\"title\":\"Software system generation\",\"url\":\"https://image-ppubs.uspto.gov/dirsearch-public/print/downloadPdf/6314555\"},{\"title\":\"SoK: Agentic Skills — Beyond Tool Use in LLM Agents\",\"url\":\"https://arxiv.org/html/2602.20867v1\"},{\"title\":\"SlopCodeBench: Benchmarking How Coding Agents Degrade Over Long-Horizon Iterative Tasks\",\"url\":\"https://arxiv.org/html/2603.24755v1\"},{\"title\":\"(PDF) Which Agent Causes Task Failures and When? On ...\",\"url\":\"https://www.arxiv.org/pdf/2505.00212v1\"}]\n\nThe initial search didn't return direct results for \"ToolMaze benchmark paper C1_task_089.\" Let me refine the search to find more specific results.\n\nLinks: [{\"title\":\"Performance of reasoning large language models on nephrology multiple-choice questions\",\"url\":\"https://www.medrxiv.org/content/10.64898/2025.12.03.25341427.full.pdf\"},{\"title\":\"Evaluating large language models for natural-language-to-code generation on aggregate Czech public health data analysis\",\"url\":\"https://www.medrxiv.org/content/10.64898/2025.12.05.25341697.full.pdf\"},{\"title\":\"Using Tools as Cues for Motor Adaptation in Virtual Reality\",\"url\":\"https://www.biorxiv.org/content/10.1101/2025.09.02.673800.full.pd",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Web search results for query: \"ToolMaze paper appendix E figure 7 convert_datetime victim tool\"\n\nLinks: [{\"title\":\"Risk of common psychiatric disorders, suicidal behaviours and premature mortality following violent victimisation: A matched cohort and sibling-comparison study of 127,628 people who experienced violence in Finland and Sweden\",\"url\":\"https://www.medrxiv.org/content/10.1101/2024.05.08.24307040.full.pdf\"},{\"title\":\"Malware Finances and Operations: a Data-Driven Study of the Value Chain   for Infections and Compromised Access\",\"url\":\"https://arxiv.org/pdf/2306.15726\"},{\"title\":\"Correction: Beyond Same-Sex Attraction: Gender-Variant-Based Victimization Is Associated with Suicidal Behavior and Substance Use for Other-Sex Attracted Adolescents\",\"url\":\"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4583254/\"},{\"title\":\"Malware and exploit campaign detection system and method\",\"url\":\"https://image-ppubs.uspto.gov/dirsearch-public/print/downloadPdf/10084817\"},{\"title\":\"Snail Mail Beats Email Any Day: On Effective Operator Security   Notifications in the Internet\",\"url\":\"https://arxiv.org/pdf/2106.08024\"},{\"title\":\"A Pilot Report on Extracting Symptom Onset Date and Time from Clinical Notes in Patients Presenting with Chest Pain\",\"url\":\"https://www.medrxiv.org/content/10.1101/2024.12.26.24319658.full.pdf\"},{\"title\":\"ShieldNet: Network-Level Guardrails against Emerging Supply-Chain Injections in Agentic Systems\",\"url\":\"https://arxiv.org/pdf/2604.04426\"},{\"title\":\"Evaluating the Effectiveness of the Mozambique-Canada Maternal Health (MCMH) Project Abstraction Tool in the Identification of Maternal Near-Miss (MNM) Events\",\"url\":\"https://www.medrxiv.org/content/10.1101/2024.05.14.24307349.full.pdf\"}]\n\nThe initial search didn't return results specifically about a \"ToolMaze\" paper. Let me refine the search to find it more precisely.\n\nLinks: [{\"title\":\"ToolPRMBench: Evaluating and Advancing Process Reward Models for Tool-using Agents\",\"url\":\"https://arxiv.org/pdf/2601.122",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebSearch",
+   "input": "{'query': 'ToolMaze arxiv LLM agent tool-use benchmark transient failure'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebSearch",
+   "input": "{'query': '\"ToolMaze\" arxiv 2025 2026 agent benchmark'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Web search results for query: \"ToolMaze arxiv LLM agent tool-use benchmark transient failure\"\n\nLinks: [{\"title\":\"ReliabilityBench: Evaluating LLM Agent Reliability Under Production-Like Stress Conditions\",\"url\":\"https://arxiv.org/html/2601.06112v1\"},{\"title\":\"Capable but Unreliable: Canonical Path Deviation as a Causal Mechanism of Agent Failure in Long-Horizon Tasks\",\"url\":\"https://arxiv.org/pdf/2602.19008\"},{\"title\":\"How Do LLMs Fail In Agentic Scenarios? A Qualitative Analysis of Success and Failure Scenarios of Various LLMs in Agentic Simulations\",\"url\":\"https://arxiv.org/html/2512.07497v2\"},{\"title\":\"TRAJECT-Bench:A Trajectory-Aware Benchmark for Evaluating Agentic Tool Use\",\"url\":\"https://arxiv.org/pdf/2510.04550\"},{\"title\":\"What Makes a Good LLM Agent for Real-world Penetration Testing?\",\"url\":\"https://arxiv.org/html/2602.17622v1\"},{\"title\":\"AgentNoiseBench: Benchmarking Robustness of Tool-Using LLM Agents Under Noisy Condition\",\"url\":\"https://arxiv.org/pdf/2602.11348\"},{\"title\":\"ToolMisuseBench: An Offline Deterministic Benchmark for Tool Misuse and Recovery in Agentic Systems\",\"url\":\"https://arxiv.org/pdf/2604.01508\"},{\"title\":\"From Task Solving to Robust Real-World Adaptation in LLM Agents\",\"url\":\"https://arxiv.org/pdf/2602.02760\"},{\"title\":\"Butterfly Effects in Toolchains: A Comprehensive Analysis of Failed Parameter Filling in LLM Tool-Agent Systems\",\"url\":\"https://arxiv.org/pdf/2507.15296\"},{\"title\":\"ReliabilityBench: Evaluating LLM Agent Reliability Under ...\",\"url\":\"https://arxiv.org/pdf/2601.06112\"}]\n\nThe initial search didn't return a specific result for \"ToolMaze.\" Let me refine the search to look for it more directly.\n\nLinks: [{\"title\":\"From Pixels to BFS: High Maze Accuracy Does Not Imply Visual Planning\",\"url\":\"https://arxiv.org/pdf/2603.26839\"},{\"title\":\"Mitigating spatial hallucination in large language models for path planning via prompt engineering\",\"url\":\"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11909242/\"},{\"title\":\"AlphaMaze: Enhancin",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Web search results for query: \"\"ToolMaze\" arxiv 2025 2026 agent benchmark\"\n\nLinks: [{\"title\":\"The Evolution of Tool Use in LLM Agents: From Single-Tool Call to Multi-Tool Orchestration\",\"url\":\"https://arxiv.org/pdf/2603.22862\"},{\"title\":\"A Survey on Evaluation of LLM-based Agents\",\"url\":\"https://arxiv.org/pdf/2503.16416\"},{\"title\":\"AD-Bench: A Real-World, Trajectory-Aware Advertising Analytics Benchmark for LLM Agents\",\"url\":\"https://arxiv.org/pdf/2602.14257\"},{\"title\":\"The Verifier Tax: Horizon Dependent Safety Success Tradeoffs in Tool Using LLM Agents\",\"url\":\"https://arxiv.org/pdf/2603.19328\"},{\"title\":\"Adaptation of Agentic AI: A Survey of Post-Training, Memory, and Skills\",\"url\":\"https://arxiv.org/pdf/2512.16301\"},{\"title\":\"Benchmark Test-Time Scaling of General LLM Agents\",\"url\":\"https://arxiv.org/html/2602.18998v1\"},{\"title\":\"Orchestrator: Active Inference for Multi-Agent Systems in Long-Horizon Tasks\",\"url\":\"https://arxiv.org/pdf/2509.05651\"}]\n\nThe initial search didn't return a specific paper titled \"ToolMaze.\" Let me refine the search to find it more directly.\n\nLinks: [{\"title\":\"From Pixels to BFS: High Maze Accuracy Does Not Imply Visual Planning\",\"url\":\"https://arxiv.org/pdf/2603.26839\"},{\"title\":\"Mitigating spatial hallucination in large language models for path planning via prompt engineering\",\"url\":\"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11909242/\"},{\"title\":\"AlphaMaze: Enhancing Large Language Models' Spatial Intelligence via   GRPO\",\"url\":\"https://arxiv.org/pdf/2502.14669\"},{\"title\":\"[2307.16789] ToolLLM: Facilitating Large Language Models to Master 16000+ Real-world APIs\",\"url\":\"https://arxiv.org/abs/2307.16789\"},{\"title\":\"Linking Trials to Publications: Enhancing Recall by Identifying Trial Registry Mentions in Full-Text\",\"url\":\"https://www.medrxiv.org/content/10.1101/2025.06.09.25329285.full.pdf\"},{\"title\":\"Stochastic characterization of navigation strategies in an automated variant of the Barnes maze\",\"url\":\"https://www.biorxiv.org/content",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "thinking",
+   "text": "Let me try to find the ToolMaze paper more specifically. It might be a newer paper or have a different exact name. Let me try searching for it on arxiv directly or on GitHub."
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebSearch",
+   "input": "{'query': 'ToolMaze \"explicit-transient\" \"victim\" tool agent evaluation'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebSearch",
+   "input": "{'query': 'ToolMaze MiniMax-M2.7 convert_datetime agent failure'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Web search results for query: \"ToolMaze MiniMax-M2.7 convert_datetime agent failure\"\n\nLinks: [{\"title\":\"[Bug]: nvidia model: minimaxai/minimax-m2.7, Model generated invalid tool call: · Issue #8259 · NousResearch/hermes-agent\",\"url\":\"https://github.com/NousResearch/hermes-agent/issues/8259\"},{\"title\":\"Minimax-M2.7 Error - Models - NVIDIA Developer Forums\",\"url\":\"https://forums.developer.nvidia.com/t/minimax-m2-7-error/366423\"},{\"title\":\"GitHub - MiniMax-AI/MiniMax-M2.7 · GitHub\",\"url\":\"https://github.com/MiniMax-AI/MiniMax-M2.7\"},{\"title\":\"Minimax-m2\",\"url\":\"https://minimax-m2.com/minimax-m27\"},{\"title\":\"MiniMax M2.7: Early Echoes of Self-Evolution - MiniMax News | MiniMax\",\"url\":\"https://www.minimax.io/news/minimax-m27-en\"},{\"title\":\"MiniMaxAI/MiniMax-M2.7 · Hugging Face\",\"url\":\"https://huggingface.co/MiniMaxAI/MiniMax-M2.7\"},{\"title\":\"Error Codes - Models - MiniMax API Docs\",\"url\":\"https://platform.minimax.io/docs/api-reference/errorcode\"},{\"title\":\"MiniMax-M2.7/docs/tool_calling_guide.md at main · MiniMax-AI/MiniMax-M2.7\",\"url\":\"https://github.com/MiniMax-AI/MiniMax-M2.7/blob/main/docs/tool_calling_guide.md\"},{\"title\":\"unsloth/MiniMax-M2.7-GGUF · Hugging Face\",\"url\":\"https://huggingface.co/unsloth/MiniMax-M2.7-GGUF\"}]\n\nThe search did not return any results specifically about **\"ToolMaze\"** or a **\"convert_datetime\" agent failure** in combination with MiniMax-M2.7. However, here is what the search did reveal about related MiniMax-M2.7 tool-calling issues:\n\n---\n\n### Known MiniMax-M2.7 Tool Call Bug\n\nThere is a well-documented bug where MiniMax-M2.7 generates **invalid tool calls with concatenated function names**:\n\n- A persistent error has been reported: \"Model generated invalid tool call: search_filessearch_files\" — invalid tool calling with concatenated function name calling seems to be occurring, causing the model to be completely useless.\n\n- Users of the Hermes agent observed the same behavior, with the bot generating errors like \"⚠️ Model generated invalid too",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Web search results for query: \"ToolMaze \"explicit-transient\" \"victim\" tool agent evaluation\"\n\nLinks: [{\"title\":\"Are Your Agents Upward Deceivers?\",\"url\":\"https://arxiv.org/pdf/2512.04864\"},{\"title\":\"Beyond the Final Answer: Evaluating the Reasoning Trajectories of Tool-Augmented Agents\",\"url\":\"https://arxiv.org/pdf/2510.02837\"},{\"title\":\"T-MAP: Red-Teaming LLM Agents with Trajectory-aware Evolutionary Search\",\"url\":\"https://arxiv.org/pdf/2603.22341\"},{\"title\":\"GraphWalk: Enabling Reasoning in Large Language Models through Tool-Based Graph Navigation\",\"url\":\"https://arxiv.org/pdf/2604.01610\"},{\"title\":\"LiveMCPBench: Can Agents Navigate an Ocean of MCP Tools?\",\"url\":\"https://arxiv.org/pdf/2508.01780\"},{\"title\":\"MMGR: Multi-Modal Generative Reasoning\",\"url\":\"https://arxiv.org/pdf/2512.14691\"},{\"title\":\"Beyond Max Tokens: Stealthy Resource Amplification via Tool Calling Chains in LLM Agents\",\"url\":\"https://arxiv.org/pdf/2601.10955\"},{\"title\":\"Breaking ReAct Agents: Foot-in-the-Door Attack Will Get You In\",\"url\":\"https://arxiv.org/pdf/2410.16950\"}]\n\nThe search did not return results that specifically match the query about **ToolMaze** with the terms **\"explicit-transient\"** and **\"victim\"** in the context of tool agent evaluation. The results instead returned several related but distinct papers on tool-augmented agent evaluation and red-teaming. Let me try a more targeted search to find the specific resource you're looking for.\n\nLinks: [{\"title\":\"Survey of Transient Execution Attacks\",\"url\":\"https://arxiv.org/pdf/2005.13435\"},{\"title\":\"Benchmark cases for robust explicit time integrators in non-smooth transient dynamics | Advanced Modeling and Simulation in Engineering Sciences | Full Text\",\"url\":\"https://amses-journal.springeropen.com/articles/10.1186/s40323-019-0126-y\"},{\"title\":\"Analysis of noisy transient signals based on Gaussian process regression\",\"url\":\"https://www.biorxiv.org/content/10.1101/2022.09.27.509665.full.pdf\"},{\"title\":\"{\\\\mu}RL: Discovering Transient ",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "thinking",
+   "text": "Let me try to find this paper on arxiv directly, or on GitHub. The paper might be called \"ToolMaze\" and could be a recent paper about tool-use benchmarks for LLM agents. Let me try searching for it on arxiv."
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebSearch",
+   "input": "{'query': 'arxiv \"ToolMaze\" tool maze LLM 2025 2026'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebSearch",
+   "input": "{'query': 'ToolMaze github tool maze benchmark agent tool calling fault injection'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Web search results for query: \"ToolMaze github tool maze benchmark agent tool calling fault injection\"\n\nLinks: [{\"title\":\"ToolMisuseBench: An Offline Deterministic Benchmark for Tool Misuse and Recovery in Agentic Systems\",\"url\":\"https://arxiv.org/pdf/2604.01508\"},{\"title\":\"GitHub - VoltAgent/awesome-ai-agent-papers: A curated collection of AI agent research papers released in 2026, covering agent engineering, memory, evaluation, workflows, and autonomous systems. · GitHub\",\"url\":\"https://github.com/VoltAgent/awesome-ai-agent-papers\"},{\"title\":\"GitHub - MikeVeerman/tool-calling-benchmark · GitHub\",\"url\":\"https://github.com/MikeVeerman/tool-calling-benchmark\"},{\"title\":\"Guardrails as Infrastructure: Policy-First Control for Tool-Orchestrated Workflows\",\"url\":\"https://arxiv.org/pdf/2603.18059\"},{\"title\":\"GitHub - SeraphimSerapis/tool-eval-bench: Tool-calling quality benchmark for LLM serving stacks. 65+ deterministic scenarios testing multi-turn orchestration, safety boundaries, and structured output. Supports vLLM, LiteLLM, and llama.cpp. · GitHub\",\"url\":\"https://github.com/SeraphimSerapis/tool-eval-bench\"},{\"title\":\"GitHub - AlessioNetti/fault_injector: FINJ is a simple tool for the injection and monitoring of faults in HPC systems, written in Python. · GitHub\",\"url\":\"https://github.com/AlessioNetti/fault_injector\"}]\n\nThe search did not return a specific result for a project called \"ToolMaze\" on GitHub. However, it did surface several closely related benchmarks and tools in the agent tool-calling and fault injection space. Here's a summary of the most relevant findings:\n\n---\n\n### 1. **ToolMisuseBench** (arxiv.org)\nToolMisuseBench is an offline deterministic benchmark for evaluating tool misuse and recovery under explicit step, call, and retry budgets. The benchmark covers CRUD, retrieval, file, and scheduling environments with replayable fault injection. The authors release a public dataset with 6,800 tasks and a reproducible evaluation pipeline.\n\n---\n\n### 2. **Tool",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Web search results for query: \"arxiv \"ToolMaze\" tool maze LLM 2025 2026\"\n\nLinks: [{\"title\":\"Act While Thinking: Accelerating LLM Agents via Pattern-Aware Speculative Tool Execution\",\"url\":\"https://arxiv.org/html/2603.18897v1\"},{\"title\":\"The Evolution of Tool Use in LLM Agents: From Single-Tool Call to Multi-Tool Orchestration\",\"url\":\"https://arxiv.org/pdf/2603.22862\"},{\"title\":\"The Evolution of Tool Use in LLM Agents: From Single-Tool Call to Multi-Tool Orchestration\",\"url\":\"https://arxiv.org/html/2603.22862v1\"},{\"title\":\"GraphWalk: Enabling Reasoning in Large Language Models through Tool-Based Graph Navigation\",\"url\":\"https://arxiv.org/pdf/2604.01610\"},{\"title\":\"Agentic Tool Use in Large Language Models\",\"url\":\"https://arxiv.org/html/2604.00835v1\"},{\"title\":\"Preprint Tool-R0: Self-Evolving LLM Agents for Tool-Learning from Zero Data\",\"url\":\"https://arxiv.org/pdf/2602.21320\"},{\"title\":\"W&D:Scaling Parallel Tool Calling for Efficient Deep ...\",\"url\":\"https://arxiv.org/pdf/2602.07359\"}]\n\nThe initial search didn't return a specific paper titled \"ToolMaze.\" Let me refine the search to find it more precisely.\n\nLinks: [{\"title\":\"Prompt Injection Attack to Tool Selection in LLM Agents\",\"url\":\"https://arxiv.org/pdf/2504.19793\"},{\"title\":\"ToolBench: LLM Tool-Use Benchmark\",\"url\":\"https://www.emergentmind.com/topics/toolbench\"},{\"title\":\"Outcome-Aware Tool Selection for Semantic Routers: Latency-Constrained Learning Without LLM Inference\",\"url\":\"https://arxiv.org/pdf/2603.13426\"},{\"title\":\"Understanding Multi-Agent LLM Frameworks: A Unified Benchmark and Experimental Analysis\",\"url\":\"https://arxiv.org/pdf/2602.03128\"},{\"title\":\"From REST to MCP: An Empirical Study of API Wrapping and Automated Server Generation for LLM Agents\",\"url\":\"https://arxiv.org/pdf/2507.16044\"},{\"title\":\"ToolBench Evaluation: LLM Tool-Use Insights\",\"url\":\"https://www.emergentmind.com/topics/toolbench-evaluation\"},{\"title\":\"Benchmarking generative AI tools for literature retrieval and summarization in g",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "thinking",
+   "text": "Let me try to find this specific paper by searching for it more directly. Let me try different queries."
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebFetch",
+   "input": "{'url': 'https://arxiv.org/search/?searchtype=all&query=ToolMaze', 'prompt': 'Find any paper titled ToolMaze or containing ToolMaze in its title or abstract. List the paper title, arxiv ID, and a brief description.'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebSearch",
+   "input": "{'query': 'site:arxiv.org ToolMaze'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "## Paper Found: ToolMaze\n\n**Title:** When Tools Fail: Benchmarking Dynamic Replanning and Anomaly Recovery in LLM Agents\n\n**arXiv ID:** 2606.05806\n\n**Brief Description:** This paper introduces ToolMaze, a benchmark designed to evaluate how LLM-based agents handle tool failures during Tool-Integrated Reasoning (TIR). Unlike existing benchmarks that test only ideal scenarios, ToolMaze focuses on \"dynamic path discovery and error recovery.\" It uses a DAG-based topological complexity structure combined with a 2×2 taxonomy of tool perturbations (explicit/implicit, transient/permanent). Key findings include that implicit semantic failures cause the most severe performance drops, with \"Perturbation Recovery Rate (PRR)\" falling by ~37% in those cases. The authors also found that fault-tolerance capabilities scale \"3.66× slower than basic task execution,\" suggesting that dynamic replanning remains a fundamental bottleneck not solved by simply scaling models. Code and data are available on GitHub.",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Web search results for query: \"site:arxiv.org ToolMaze\"\n\nLinks: [{\"title\":\"Stochastic characterization of navigation strategies in an automated variant of the Barnes maze\",\"url\":\"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11189626/\"},{\"title\":\"Exploring motor skill acquisition in bimanual coordination: insights from navigating a novel maze task\",\"url\":\"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11324764/\"},{\"title\":\"Hand-selective visual regions represent how to grasp 3D tools: brain decoding during real actions\",\"url\":\"https://www.biorxiv.org/content/10.1101/2020.10.14.339606.full.pdf\"},{\"title\":\"AMaze: an intuitive benchmark generator for fast prototyping of generalizable agents\",\"url\":\"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11979106/\"},{\"title\":\"An Integrated Platform for in vivo Electrophysiology in Spatial Cognition Experiments\",\"url\":\"https://www.biorxiv.org/content/10.1101/2023.08.02.551691.full.pdf\"}]\n\nThe search using the `site:arxiv.org` operator did not return any direct results from arxiv.org related to \"ToolMaze.\" The results that came back were from other sources (NCBI, bioRxiv) and were related to various maze-related research topics, but none specifically about a paper or project called \"ToolMaze\" on arXiv.\n\nLet me try a broader search to see if \"ToolMaze\" exists as a research paper or project:\n\nLinks: [{\"title\":\"Mitigating spatial hallucination in large language models for path planning via prompt engineering\",\"url\":\"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11909242/\"},{\"title\":\"A computational model of learning flexible navigation in a maze by layout-conforming replay of place cells\",\"url\":\"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC9947252/\"},{\"title\":\"Hand-selective visual regions represent how to grasp 3D tools: brain decoding during real actions\",\"url\":\"https://www.biorxiv.org/content/10.1101/2020.10.14.339606.full.pdf\"},{\"title\":\"Linking Trials to Publications: Enhancing Recall by Identifying Trial Registry Mentions in Full-Tex",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "thinking",
+   "text": "The WebFetch found it! The paper is \"When Tools Fail: Benchmarking Dynamic Replanning and Anomaly Recovery in LLM Agents\" with arXiv ID 2606.05806. Let me now fetch the full paper to get the details about C1_task_089, MiniMax-M2.7, and the convert_datetime victim tool."
+  },
+  {
+   "turn": "dossier",
+   "type": "text",
+   "text": "I found the paper. It's arXiv:2606.05806 — \"When Tools Fail: Benchmarking Dynamic Replanning and Anomaly Recovery in LLM Agents\" (ToolMaze). Let me now retrieve the full details."
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebFetch",
+   "input": "{'url': 'https://arxiv.org/abs/2606.05806', 'prompt': 'Get the full abstract, paper details, author names, and any links to the paper PDF, GitHub repository, or supplementary materials.'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebFetch",
+   "input": "{'url': 'https://arxiv.org/pdf/2606.05806', 'prompt': 'Extract ALL content from this paper, focusing especially on:\\n1. The ToolMaze benchmark description and methodology\\n2. The 2x2 taxonomy of perturbations (explicit/implicit x transient/permanent)\\n3. Appendix E and Figure 7\\n4. Task C1_task_089 - any details about this specific task\\n5. The \"victim\" tool concept, especially convert_datetime\\n6. MiniMax-M2.7 results and agent behavior\\n7. Category C1/P1 (explicit-transient) perturbation details\\n8. Any trajectory or step-by-step agent behavior examples\\n9. The DAG-based task structure\\nExtract as much detail as possible.'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "# ToolMaze: When Tools Fail — Paper Details\n\n## Title\n**When Tools Fail: Benchmarking Dynamic Replanning and Anomaly Recovery in LLM Agents**\n\n## Authors\nDongsheng Zhu, Xuchen Ma, Yucheng Shen, Xiang Li, Yukun Zhao, Shuaiqiang Wang, Lingyong Yan, Dawei Yin\n\n## ArXiv ID\narXiv:2606.05806 [cs.AI] — Submitted June 4, 2026\n\n## Abstract\n\nThe paper introduces **ToolMaze**, a benchmark designed to evaluate how LLM-based agents handle tool failures during reasoning tasks. Current benchmarks test Tool-Integrated Reasoning (TIR) only under ideal conditions, ignoring real-world breakdowns. ToolMaze uses a two-dimensional design: \"DAG-based topological complexity\" combined with a \"2×2 taxonomy of tool perturbations (explicit/implicit, transient/permanent).\"\n\nKey findings include:\n\n- Perturbations hurt performance across nearly all models, with the worst degradation under **implicit semantic failures**\n- \"Perturbation Recovery Rate (PRR) plummets by around 37% in these scenarios\" due to \"systemic over-trust in corrupted outputs\"\n- Complex topologies cause agents to get stuck in \"futile trial-and-error loops\"\n- Fault-tolerance capability \"improves with model scale 3.66× slower than basic task execution,\" revealing dynamic replanning as a distinct bottleneck not solved by scaling or prompting alone\n\n## Links\n\n- **PDF:** [https://arxiv.org/pdf/2606.05806](https://arxiv.org/pdf/2606.05806)\n- **HTML (experimental):** [https://arxiv.org/html/2606.05806v1](https://arxiv.org/html/2606.05806v1)\n- **GitHub Repository:** [https://github.com/Zhudongsheng75/ToolMaze](https://github.com/Zhudongsheng75/ToolMaze)\n\n## License\nCreative Commons Attribution 4.0 (CC BY 4.0)",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "# Analysis of \"When Tools Fail: Benchmarking Dynamic Replanning and Anomaly Recovery in LLM Agents\"\n\nBased on the PDF metadata and structural content available, I can extract the following information. However, I must note that the actual text content of this paper is encoded in compressed binary streams (FlateDecode), meaning the body text, tables, and figures are not directly readable from the raw PDF structure provided. I can still extract significant structural and metadata information.\n\n## Paper Overview\n\n**Title:** \"When Tools Fail: Benchmarking Dynamic Replanning and Anomaly Recovery in LLM Agents\"\n\n**Authors:** Dongsheng Zhu, Xuchen Ma, Yucheng Shen, Xiang Li, Yukun Zhao, Shuaiqiang Wang, Lingyong Yan, Dawei Yin\n\n**ArXiv ID:** 2606.05806v1, categorized under cs.AI, published under CC BY 4.0 license.\n\n**Code Repository:** https://github.com/Zhudongsheng75/ToolMaze\n\n## Paper Structure (from Outline/Bookmark Tree)\n\nThe paper contains **38 pages** organized into the following sections:\n\n1. **Introduction** (Section 1)\n2. **Related Work** (Section 2) — with two subsections (2.1, 2.2)\n3. **Section 3** — with five subsections (3.1–3.5), likely the ToolMaze benchmark methodology\n4. **Section 4** — with three subsections (4.1–4.3), likely experiments/results\n5. **Section 5** — likely discussion or conclusion\n6. **Appendix A–E**, with Appendix E titled \"Case Studies\"\n7. **Appendix D** titled \"Full Results\"\n8. **Appendix C** contains four subsections (C.1–C.4)\n\n## DAG-Based Task Structure\n\nFrom the named destinations and structural references, the benchmark uses a **DAG (Directed Acyclic Graph)** task structure. The paper defines multiple equations (equations 1–4) that likely formalize the DAG-based task representation and evaluation metrics.\n\n## 2×2 Taxonomy of Perturbations\n\nFrom the citation references and named destinations, the paper establishes categories that map to a 2×2 taxonomy. The structural references include categories like **C1** (visible in task naming ",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "thinking",
+   "text": "Good, I found the paper. Now I need to get the actual content. Let me try the HTML version and the GitHub repo to get more details about C1_task_089 and MiniMax-M2.7's behavior."
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebFetch",
+   "input": "{'url': 'https://arxiv.org/html/2606.05806v1', 'prompt': 'Extract ALL content about:\\n1. The 2x2 taxonomy of perturbations - explicit vs implicit, transient vs permanent. What does each category mean? What is C1/P1?\\n2. The concept of \"victim\" tools - how are they defined? What is convert_datetime?\\n3. Any mention of task C1_task_089\\n4. Any mention of MiniMax-M2.7 results or behavior\\n5. Appendix E case studies - especially Figure 7\\n6. How the DAG-based tasks work\\n7. What \"explicit-transient\" perturbation means concretely\\n8. Any agent trajectory examples showing step-by-step behavior\\nExtract as much detail as possible, including any code listings or trajectory traces.'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebFetch",
+   "input": "{'url': 'https://github.com/Zhudongsheng75/ToolMaze', 'prompt': 'Extract ALL information about:\\n1. The repository structure and what files/data are available\\n2. Any task data files, especially those containing C1_task_089\\n3. Any agent trajectory data for MiniMax-M2.7\\n4. Tool definitions, especially convert_datetime\\n5. The perturbation categories and how they are implemented\\n6. Any README content explaining the benchmark\\n7. Links to data files or subdirectories'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "# ToolMaze Repository Analysis\n\n## 1. Repository Structure\n\nThe project layout is organized as follows:\n\n```\nToolMaze/\n├── toolmaze/              # Core runtime (ExecutionContext, ToolExecutor, etc.)\n├── tools/                 # 273 tool plugins + YAML definitions\n│   ├── definitions/       # Tool spec YAMLs (Source / Processor / Action)\n│   └── plugins/           # Executable plugin modules\n├── data/\n│   ├── perturbed_tasks/   # Task JSONs grouped by complexity (c1..c4)\n│   ├── tasks/             # Task JSONs generated from templates\n│   └── templates/         # DAG templates used by the judge\n├── evaluation/\n│   ├── core/              # sandbox.py, judge.py, metrics.py\n│   ├── agents/            # OpenAI / Anthropic / VLLM / MCP agents\n│   ├── utils/             # trace_logger, result_saver\n│   ├── configs/           # YAML configs\n│   ├── scripts/           # run_eval.py, find_failed_inferences.py\n│   └── results/           # Output directory (auto-populated)\n├── run_api_eval.py        # Single-model API runner\n├── run_batch_api_eval.py  # Multi-model concurrent runner\n└── requirements.txt\n```\n\nThe repo root on GitHub shows directories: `evaluation/`, `toolmaze/`, `tools/`, plus files `.gitignore`, `README.md`, `requirements.txt`, `run_api_eval.py`, `run_batch_api_eval.py`. It has 6 commits on the `main` branch.\n\n## 2. Task Data Files & C1_task_089\n\nTask data lives under `data/perturbed_tasks/` (grouped by complexity c1–c4), `data/tasks/` (generated from templates), and `data/templates/` (DAG templates for the judge). **The `data/` directory is NOT visible in the GitHub tree**—it must be downloaded separately from HuggingFace.\n\nThe dataset is hosted at: **https://huggingface.co/datasets/dongsheng/ToolMaze** and should be unzipped into the `data/` folder.\n\nA task like `C1_task_089` would reside under `data/perturbed_tasks/c1/` (or `data/tasks/`). The task ID format is `C{complexity}_task_{number}_P{mode}`, as shown by the example: \"python evaluation/scripts/run_ev",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "# Detailed Extraction from the ToolMaze Paper\n\n## 1. The 2×2 Taxonomy of Perturbations (𝒫-axis)\n\nThe perturbation taxonomy is built from two orthogonal binary dimensions:\n\n**Error Manifestation (Explicit vs. Implicit):**\n- **Explicit failures** involve \"machine-readable exceptions (such as HTTP 404) that obstruct program execution.\" These are clear, unambiguous error signals that the agent can detect programmatically.\n- **Implicit failures** \"generate structurally compliant but semantically flawed outputs,\" such as a tool returning a negative stock count due to delayed inventory updates. The response *looks* valid in structure but contains corrupted or wrong data, requiring the agent to autonomously verify semantic correctness.\n\n**Temporal Persistence (Transient vs. Permanent):**\n- **Transient** failures are \"resolvable via simple retries\" — the fault affects only the initial invocation and clears on subsequent calls.\n- **Permanent** failures \"force dynamic rerouting or graceful termination\" — the tool remains broken or corrupted on all future calls.\n\n**The Four Modes:**\n- **𝒫1 (Explicit-Transient):** A clear error (e.g., HTTP error code) on first call that resolves upon retry.\n- **𝒫2 (Explicit-Permanent):** A clear error that persists, forcing the agent to find alternative tools or abort gracefully.\n- **𝒫3 (Implicit-Transient):** Structurally valid but semantically wrong output on first call; retrying yields correct output.\n- **𝒫4 (Implicit-Permanent):** Structurally valid but semantically corrupted output that persists across all calls, requiring rerouting or termination.\n\n**Complexity Levels (𝒞-axis):**\n- **𝒞1 (Linear):** \"a single path with no alternatives, testing basic execution and graceful failure handling.\" No recovery routes exist — the agent must either retry (transient) or gracefully abort (permanent).\n- **𝒞2 (1-to-N alternatives):** Introduces \"functionally equivalent substitutes, requiring direct single-step substitution.\"\n- **𝒞3 (Many-to-many multi-pa",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "thinking",
+   "text": "Now I need to get more details. Let me:\n1. Check the HuggingFace dataset for the specific task C1_task_089\n2. Try to access the tools/definitions directory for convert_datetime\n3. Look at Appendix E / Figure 7 from the paper\n\nLet me try to access the HuggingFace dataset and the GitHub repo for more details."
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebFetch",
+   "input": "{'url': 'https://huggingface.co/datasets/dongsheng/ToolMaze', 'prompt': 'Extract all information about this dataset. Look for:\\n1. Dataset structure and files available\\n2. Any viewer showing task data, especially C1_task_089\\n3. File listing or directory structure\\n4. Any documentation about the dataset format\\n5. Number of tasks, categories, etc.'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'curl -s \"https://datasets-server.huggingface.co/rows?dataset=dongsheng/ToolMaze&config=default&split=train&offset=0&length=5\" 2>/dev/null | python3 -m json.tool 2>/dev/null | head -200', 'description': 'Fetch first rows of ToolMaze HuggingFace dataset'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "# ToolMaze Dataset Summary\n\n## Overview\n**Repository:** `dongsheng/ToolMaze` on Hugging Face\n**Paper:** \"When Tools Fail: Benchmarking Dynamic Replanning and Anomaly Recovery in LLM Agents\" (arXiv: 2606.05806)\n**Size category:** 1K < n < 10K samples\n**Total file size:** 119 MB\n**Downloads last month:** 1,412\n**Likes:** 4\n\n## Purpose\nAn evaluation framework for testing LLM agents on **C1/C2/C3/C4** tool-use tasks under **P0–P4 perturbation modes**. The framework runs an agent inside a sandboxed tool runtime, intercepts tool calls to inject perturbations, and scores the result with a complexity-aware judge.\n\n## Dataset Structure\n\n### Subsets and Splits\n- **1 subset:** `default`\n- **1 split:** `train`\n\n### Schema (from the error trace)\nThe dataset contains deeply nested JSON/struct data with these fields per record:\n\nEach record in a list column contains structs with:\n- **`step`**: int64\n- **`tool_name`**: string\n- **`arguments`**: struct containing:\n  - `flight_number`, `passenger_name`, `seat_class`, `hotel_name`, `guest_name`, `room_type` (strings)\n  - `check_in_date`, `check_out_date` (timestamp)\n  - `flight_data`: nested struct (flight_number, airline, departure, arrival, departure_time, arrival_time, status, gate)\n- **`output`**: struct containing:\n  - Flight info fields, booking fields (`booking_id`, `confirmation_code`, `flight_status`), hotel fields (`hotel_name`, `location`, `price_per_night`, `currency`, `rating`, `availability`), guest/room fields\n- **`status`**: string\n- **`error_message`**: string\n- **`is_perturbed`**: bool\n\n## Dataset Viewer Status\n**The dataset viewer is NOT working** due to a `StreamingRowsError` / `TypeError`. The issue is a schema mismatch: the actual data has extra fields (`error_message`, `is_perturbed`, `error` in output) that are not present in the declared features schema. This is a casting incompatibility in the HuggingFace `datasets` library.\n\n## Key Details Not Available from This Page\n- **No viewer data is shown** — so speci",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "{\n    \"error\": \"The dataset generation failed\",\n    \"cause_exception\": \"TypeError\",\n    \"cause_message\": \"Couldn't cast array of type\\nstruct<step: int64, tool_name: string, arguments: struct<flight_number: string, flight_data: struct<flight_number: string, airline: string, departure: string, arrival: string, departure_time: string, arrival_time: string, status: string, gate: string>, passenger_name: string, seat_class: string, hotel_name: string, check_in_date: timestamp[s], check_out_date: timestamp[s], guest_name: string, room_type: string>, output: struct<flight_number: string, airline: string, departure: string, arrival: string, departure_time: string, arrival_time: string, status: string, gate: string, passenger_name: string, seat_class: string, route_summary: string, booking_ready: bool, error: string, message: string, booking_id: string, confirmation_code: string, flight_status: string, hotel_name: string, location: string, price_per_night: int64, currency: string, rating: double, availability: string, guest_name: string, check_in_date: timestamp[s], check_out_date: timestamp[s], room_type: string>, status: string, error_message: string, is_perturbed: bool>\\nto\\n{'step': Value('int64'), 'tool_name': Value('string'), 'arguments': {'flight_number': Value('string'), 'flight_data': {'flight_number': Value('string'), 'airline': Value('string'), 'departure': Value('string'), 'arrival': Value('string'), 'departure_time': Value('string'), 'arrival_time': Value('string'), 'status': Value('string'), 'gate': Value('string')}, 'passenger_name': Value('string'), 'seat_class': Value('string'), 'hotel_name': Value('string'), 'check_in_date': Value('timestamp[s]'), 'check_out_date': Value('timestamp[s]'), 'guest_name': Value('string'), 'room_type': Value('string')}, 'output': {'flight_number': Value('string'), 'airline': Value('string'), 'departure': Value('string'), 'arrival': Value('string'), 'departure_time': Value('string'), 'arrival_time': Value('string'), 'status': Va",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "thinking",
+   "text": "The HuggingFace dataset viewer is broken. Let me try to access the raw files from HuggingFace directly. Let me try to get the file tree first."
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'curl -s \"https://huggingface.co/api/datasets/dongsheng/ToolMaze/tree/main\" 2>/dev/null | python3 -m json.tool 2>/dev/null | head -100', 'description': 'List files in ToolMaze HuggingFace dataset'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebFetch",
+   "input": "{'url': 'https://github.com/Zhudongsheng75/ToolMaze/tree/main/tools/definitions', 'prompt': 'List all tool definition YAML files. Look specifically for anything related to convert_datetime or datetime conversion tools.'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "[\n    {\n        \"type\": \"directory\",\n        \"oid\": \"655cecb1fdbef2c418d3d2c4423903220064e838\",\n        \"size\": 0,\n        \"path\": \"perturbed_tasks\"\n    },\n    {\n        \"type\": \"directory\",\n        \"oid\": \"e67293a7c1dce4f20d664f1525f11140f0e89f16\",\n        \"size\": 0,\n        \"path\": \"tasks\"\n    },\n    {\n        \"type\": \"directory\",\n        \"oid\": \"aad4d91a400e1ef32dec7dbdd375256b689680b9\",\n        \"size\": 0,\n        \"path\": \"templates\"\n    },\n    {\n        \"type\": \"file\",\n        \"oid\": \"bed0738c7eeb449bca98b5d2f33c89a1ee56349a\",\n        \"size\": 2504,\n        \"path\": \".gitattributes\"\n    },\n    {\n        \"type\": \"file\",\n        \"oid\": \"cf63167ac72f4bb05f1845233a7ef7f11bb4c7a4\",\n        \"size\": 934,\n        \"path\": \"README.md\"\n    }\n]",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "## Tool Definition YAML Files in `ToolMaze/tools/definitions`\n\nThe directory contains four YAML files:\n\n1. **action.yaml**\n2. **alternatives.yaml**\n3. **processor.yaml**\n4. **source.yaml**\n\n## Regarding `convert_datetime` or Datetime Conversion Tools\n\nBased on the directory listing shown on this GitHub page, **there is no file specifically named after a `convert_datetime` or datetime conversion tool**. The page only displays filenames and no file contents, so it's not possible to determine from this view alone whether any of the four YAML files (action, alternatives, processor, source) contain definitions for a datetime conversion tool internally.\n\nTo find out if `convert_datetime` is defined within one of these files, you would need to examine the contents of each YAML file — most likely **processor.yaml** or **action.yaml**, as those names suggest they could contain data transformation or action-oriented tool definitions.",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'curl -s \"https://huggingface.co/api/datasets/dongsheng/ToolMaze/tree/main/perturbed_tasks\" 2>/dev/null | python3 -m json.tool 2>/dev/null', 'description': 'List perturbed_tasks directory structure'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebFetch",
+   "input": "{'url': 'https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/tools/definitions/processor.yaml', 'prompt': 'Find any tool definition related to convert_datetime or datetime conversion. Extract its full definition including name, description, parameters, and any other details.'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "[\n    {\n        \"type\": \"directory\",\n        \"oid\": \"e2aedc1f76b7629afa79a691f97090949990ecd9\",\n        \"size\": 0,\n        \"path\": \"perturbed_tasks/c1\"\n    },\n    {\n        \"type\": \"directory\",\n        \"oid\": \"c9d6df73328c92fcc24dc02b6bb3400300e0e35b\",\n        \"size\": 0,\n        \"path\": \"perturbed_tasks/c2\"\n    },\n    {\n        \"type\": \"directory\",\n        \"oid\": \"48f9ed74feaf73af427ff40e76a2fc7dc331f656\",\n        \"size\": 0,\n        \"path\": \"perturbed_tasks/c3\"\n    },\n    {\n        \"type\": \"directory\",\n        \"oid\": \"e7d0e0e3794eec45009b6b2ac45619c5515dba13\",\n        \"size\": 0,\n        \"path\": \"perturbed_tasks/c4\"\n    },\n    {\n        \"type\": \"file\",\n        \"oid\": \"28f90566532ecfe6db952657ad1f2ec5abc1d6be\",\n        \"size\": 2366,\n        \"path\": \"perturbed_tasks/clean_banned_tools.py\"\n    }\n]",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "# `convert_datetime` Tool Definition\n\n## Basic Info\n- **Name:** `convert_datetime`\n- **Description:** \"Convert Unix timestamp to human-readable datetime string (YYYY-MM-DD HH:MM)\"\n- **Category:** Processor\n- **Domain:** General\n- **Substitutes:** None\n\n## Function Call Specification\n\nThe tool converts an \"integer Unix timestamp to formatted datetime string\" and takes a single required parameter:\n\n| Parameter | Type | Required | Description |\n|-----------|------|----------|-------------|\n| `timestamp` | integer | Yes | \"Unix timestamp in seconds\" |\n\n## MCP Paradigm\n\n**Prompt Signature:**\n`convert_datetime(timestamp: int) -> str`\n\n**Prompt Description:** Converts a Unix timestamp to `'YYYY-MM-DD HH:MM'` string format. Returns a dictionary with the following fields when successful, or an error response when validation fails:\n\n### Output Schema\n\n| Field | Type | Description |\n|-------|------|-------------|\n| `original_timestamp` | integer | The input timestamp value |\n| `formatted_time` | string | Result in `'YYYY-MM-DD HH:MM'` format |\n| `success` | boolean | Indicates success or failure (mentioned in description but not in schema) |\n| `error` | string | Error message if validation fails (mentioned in description but not in schema) |\n\nThe MCP description notes that \"if validation fails, it returns 'success' as False and an 'error' message,\" though `success` and `error` are described in the prompt text rather than explicitly listed in the `output_schema` section.",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "thinking",
+   "text": "Now I have the convert_datetime tool definition. Let me now try to access the specific task C1_task_089 from the HuggingFace dataset."
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'curl -s \"https://huggingface.co/api/datasets/dongsheng/ToolMaze/tree/main/perturbed_tasks/c1\" 2>/dev/null | python3 -m json.tool 2>/dev/null | python3 -c \"\\nimport json, sys\\ndata = json.load(sys.stdin)\\n# Look for task_089\\nfor item in data:\\n    if \\'089\\' in item.get(\\'path\\', \\'\\'):\\n        print(json.dumps(item, indent=2))\\n\" 2>/dev/null', 'description': 'Find task_089 in perturbed_tasks/c1'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'curl -s \"https://huggingface.co/api/datasets/dongsheng/ToolMaze/tree/main/perturbed_tasks/c1\" 2>/dev/null | python3 -m json.tool 2>/dev/null | head -80', 'description': 'List first entries in perturbed_tasks/c1'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "{\n  \"type\": \"file\",\n  \"oid\": \"5b7e9ea4c2e4d52783ccec2b1f42c7e3a98222b0\",\n  \"size\": 10236,\n  \"path\": \"perturbed_tasks/c1/C1_task_089_P0.json\"\n}\n{\n  \"type\": \"file\",\n  \"oid\": \"3a8d82efba93181aeb0d2ca9a63f115e06b2dba9\",\n  \"size\": 10959,\n  \"path\": \"perturbed_tasks/c1/C1_task_089_P1.json\"\n}\n{\n  \"type\": \"file\",\n  \"oid\": \"f619fe8b4b06ae9bd99ea6a5f8921ae3ffde3ae7\",\n  \"size\": 10313,\n  \"path\": \"perturbed_tasks/c1/C1_task_089_P2.json\"\n}\n{\n  \"type\": \"file\",\n  \"oid\": \"df3ddc3248fdfc8c33c8c096d604c89bafd5263a\",\n  \"size\": 11025,\n  \"path\": \"perturbed_tasks/c1/C1_task_089_P3.json\"\n}\n{\n  \"type\": \"file\",\n  \"oid\": \"549bbf525875ac028b6e6c6b52cda39a37766fae\",\n  \"size\": 10380,\n  \"path\": \"perturbed_tasks/c1/C1_task_089_P4.json\"\n}",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "[\n    {\n        \"type\": \"file\",\n        \"oid\": \"6fae4d631455f614f125ed127c5a3e90afcd06aa\",\n        \"size\": 8543,\n        \"path\": \"perturbed_tasks/c1/C1_task_001_P0.json\"\n    },\n    {\n        \"type\": \"file\",\n        \"oid\": \"7c9aa127a14b5a90c968c0d5a645fcf39434beb1\",\n        \"size\": 9497,\n        \"path\": \"perturbed_tasks/c1/C1_task_001_P1.json\"\n    },\n    {\n        \"type\": \"file\",\n        \"oid\": \"5246b90700a2ce8f10cc7ac70c645539a4cff4a4\",\n        \"size\": 8070,\n        \"path\": \"perturbed_tasks/c1/C1_task_001_P2.json\"\n    },\n    {\n        \"type\": \"file\",\n        \"oid\": \"9dc4868e1828614df2095cef43b0545737329d19\",\n        \"size\": 10397,\n        \"path\": \"perturbed_tasks/c1/C1_task_001_P3.json\"\n    },\n    {\n        \"type\": \"file\",\n        \"oid\": \"7f6ddaa57eb37259633098c7d79f6359b4582470\",\n        \"size\": 9254,\n        \"path\": \"perturbed_tasks/c1/C1_task_001_P4.json\"\n    },\n    {\n        \"type\": \"file\",\n        \"oid\": \"613cc2bdbfd93baea2eb077b34da73d08813a2b7\",\n        \"size\": 8685,\n        \"path\": \"perturbed_tasks/c1/C1_task_002_P0.json\"\n    },\n    {\n        \"type\": \"file\",\n        \"oid\": \"d65ecdc958f885bbcbd6ed4d985f9a1a9dc860fa\",\n        \"size\": 9617,\n        \"path\": \"perturbed_tasks/c1/C1_task_002_P1.json\"\n    },\n    {\n        \"type\": \"file\",\n        \"oid\": \"6fab84c80517def0016d6777fa6e97d78106b029\",\n        \"size\": 6380,\n        \"path\": \"perturbed_tasks/c1/C1_task_002_P2.json\"\n    },\n    {\n        \"type\": \"file\",\n        \"oid\": \"ee83d7f4cbdda9834c3a0cd696f309a51ea0e7e1\",\n        \"size\": 10315,\n        \"path\": \"perturbed_tasks/c1/C1_task_002_P3.json\"\n    },\n    {\n        \"type\": \"file\",\n        \"oid\": \"5212ab7c098890036ee07aba1eb8b5d714e67d5f\",\n        \"size\": 7099,\n        \"path\": \"perturbed_tasks/c1/C1_task_002_P4.json\"\n    },\n    {\n        \"type\": \"file\",\n        \"oid\": \"b4a0a810c92f7eb1aec9818915dc5a875566a64d\",\n        \"size\": 9092,\n        \"path\": \"perturbed_tasks/c1/C1_task_003_P0.json\"\n    },\n    {\n        \"type\": \"file\",\n        \"oid\": \"1af080f683d0da0648a8dd47a",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'curl -sL \"https://huggingface.co/datasets/dongsheng/ToolMaze/resolve/main/perturbed_tasks/c1/C1_task_089_P1.json\" 2>/dev/null | python3 -m json.tool 2>/dev/null', 'description': 'Download C1_task_089_P1 (explicit-transient perturbation) task definition'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'curl -sL \"https://huggingface.co/datasets/dongsheng/ToolMaze/resolve/main/perturbed_tasks/c1/C1_task_089_P0.json\" 2>/dev/null | python3 -m json.tool 2>/dev/null', 'description': 'Download C1_task_089_P0 (baseline, no perturbation) task definition'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "{\n    \"task_id\": \"C1_task_089\",\n    \"template_id\": \"C1_template_089\",\n    \"complexity\": \"C1\",\n    \"task_description\": \"Please reserve 1 black Sony XM5 for me, then prepare the checkout from that hold and tell me when the reservation expires. After that, suggest some popular alternatives in the same category, and send me an in-app notification with the details.\",\n    \"user_input\": {\n        \"query\": \"Hi, for user_123, please reserve 1 black Sony XM5 for me using product_id p_sony_xm5_blk. The title is Untitled and the data is test. After you place the hold, please prepare the checkout from that reservation and let me know exactly when the reservation expires. Then suggest some popular alternatives in the same category, and send me an in-app notification with all the details.\",\n        \"data\": \"test\",\n        \"product_id\": \"p_sony_xm5_blk\",\n        \"quantity\": 1,\n        \"title\": \"Untitled\",\n        \"user_id\": \"user_123\"\n    },\n    \"execution_trace\": [\n        {\n            \"step\": 1,\n            \"tool_name\": \"hold_inventory\",\n            \"arguments\": {\n                \"product_id\": \"p_sony_xm5_blk\",\n                \"user_id\": \"user_123\",\n                \"quantity\": 1\n            },\n            \"output\": {\n                \"reservation_id\": \"RESV-14729548\",\n                \"expires_in\": 300,\n                \"product_id\": \"p_sony_xm5_blk\",\n                \"quantity\": 1,\n                \"total_price\": 399.0,\n                \"expiry_time\": 1710000300,\n                \"reservation_details\": {\n                    \"product_id\": \"p_sony_xm5_blk\",\n                    \"quantity\": 1,\n                    \"total_price\": 399.0\n                }\n            },\n            \"status\": \"success\"\n        },\n        {\n            \"step\": 2,\n            \"tool_name\": \"build_checkout_from_hold\",\n            \"arguments\": {\n                \"hold_data\": {\n                    \"reservation_id\": \"RESV-14729548\",\n                    \"expires_in\": 300,\n                    \"product_id\": \"p_sony_xm5_b",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "{\n    \"task_id\": \"C1_task_089\",\n    \"template_id\": \"C1_template_089\",\n    \"complexity\": \"C1\",\n    \"task_description\": \"Please reserve 1 black Sony XM5 for me, then prepare the checkout from that hold and tell me when the reservation expires. After that, suggest some popular alternatives in the same category, and send me an in-app notification with the details.\",\n    \"user_input\": {\n        \"query\": \"Hi, for user_123, please reserve 1 black Sony XM5 for me using product_id p_sony_xm5_blk. The title is Untitled and the data is test. After you place the hold, please prepare the checkout from that reservation and let me know exactly when the reservation expires. Then suggest some popular alternatives in the same category, and send me an in-app notification with all the details.\",\n        \"data\": \"test\",\n        \"product_id\": \"p_sony_xm5_blk\",\n        \"quantity\": 1,\n        \"title\": \"Untitled\",\n        \"user_id\": \"user_123\"\n    },\n    \"execution_trace\": [\n        {\n            \"step\": 1,\n            \"tool_name\": \"hold_inventory\",\n            \"arguments\": {\n                \"product_id\": \"p_sony_xm5_blk\",\n                \"user_id\": \"user_123\",\n                \"quantity\": 1\n            },\n            \"output\": {\n                \"reservation_id\": \"RESV-14729548\",\n                \"expires_in\": 300,\n                \"product_id\": \"p_sony_xm5_blk\",\n                \"quantity\": 1,\n                \"total_price\": 399.0,\n                \"expiry_time\": 1710000300,\n                \"reservation_details\": {\n                    \"product_id\": \"p_sony_xm5_blk\",\n                    \"quantity\": 1,\n                    \"total_price\": 399.0\n                }\n            },\n            \"status\": \"success\"\n        },\n        {\n            \"step\": 2,\n            \"tool_name\": \"build_checkout_from_hold\",\n            \"arguments\": {\n                \"hold_data\": {\n                    \"reservation_id\": \"RESV-14729548\",\n                    \"expires_in\": 300,\n                    \"product_id\": \"p_sony_xm5_b",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "thinking",
+   "text": "Now I have both the P0 (baseline) and P1 (explicit-transient) versions of C1_task_089. Let me analyze them:\n\n**Task C1_task_089:**\n- Complexity: C1 (linear, single path, no alternatives)\n- Domain: Shopping + General\n- Task description: Reserve 1 black Sony XM5, prepare checkout from the hold, tell when reservation expires, suggest popular alternatives, send in-app notification\n\n**The expected tool chain (linear DAG):**\n1. `hold_inventory` - Reserve the product\n2. `build_checkout_from_hold` - Prepare checkout from the reservation\n3. `convert_datetime` - Convert the expiry_time Unix timestamp to human-readable format\n4. `get_recommendations_popularity` - Get popular alternatives\n5. `create_document_and_alert_from_data` - Send in-app notification\n\n**P1 (explicit-transient) perturbation:**\n- Perturbation point: step 2 (0-indexed), which is tool #3 = `convert_datetime`\n- The first call to `convert_datetime` returns an internal server error with status \"error\" and is marked as perturbed\n- The expected recovery involves retrying the call\n\n, which succeeds on the second attempt and returns the formatted timestamp\n\nSo `convert_datetime` is the victim tool that gets perturbed. Now I need to find the actual MiniMax-M2.7 agent trajectory on this task by checking the paper's appendix and figures, plus any results in the GitHub repo."
+  },
+  {
+   "turn": "dossier",
+   "type": "text",
+   "text": "Excellent! Now I have the task definition. Let me now look for the MiniMax-M2.7 agent trajectory and the paper's Appendix E / Figure 7."
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebFetch",
+   "input": "{'url': 'https://arxiv.org/html/2606.05806v1', 'prompt': 'Find and extract the COMPLETE content of Appendix E (Case Studies), especially Figure 7. Also look for any discussion of MiniMax-M2.7 behavior on specific tasks, especially C1_task_089 or any C1/P1 explicit-transient examples. Extract any code listings, trajectory traces, or step-by-step agent behavior examples. Focus on the second half of the paper - Appendices D and E. Also look for any discussion of how agents handle the convert_datetime tool failure.'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "# Appendix E (Case Studies) and Related Content\n\n## What's Available vs. What's Missing\n\nThe web page content is **truncated** before Appendix E could be displayed. The document explicitly ends with the note `[Content truncated due to length...]` partway through Appendix D's Table 22 (the full results table for the failure-aware prompt). The table of contents confirms that **Appendix E: Case Studies** exists as a section, but its actual content — including Figure 7 and any trajectory traces — was not included in the provided web page content.\n\n## What Can Be Extracted\n\n### From Appendix D (Partial)\n\nThe full results tables (Tables 20–22) are partially present. Key MiniMax-M2.7 data points from Table 21 (standard prompt):\n\n- At **𝒞1 under 𝒫1** (explicit-transient): TSR = 37%, PRR = 50.57%, RC = 50.40%\n- At **𝒞1 under 𝒫3** (implicit-transient): TSR = 3%, PRR = 3.41%, RC = 85.20%\n\nThis illustrates the \"implicit–explicit trust gap\" — PRR drops from ~51% to ~3% when failures shift from explicit to implicit at the simplest topology level.\n\nFrom Table 22 (failure-aware prompt), MiniMax-M2.7 at 𝒞1/𝒫1 improves to TSR = 47%, PRR = 72.83%, but at 𝒞1/𝒫3 remains extremely low at TSR = 1%, PRR = 1.08%.\n\n### Regarding Specific Tasks and Tool Failures\n\n**No specific discussion of C1_task_089, the convert_datetime tool, or any named individual task** appears in the provided content. The paper describes its perturbation engine in general terms — fault profiles specify \"which tool on the preferred path s* should fail\" with \"pre-specified synthetic response\" — but no concrete step-by-step agent trajectory, code listing, or named task example is present in the extracted text.\n\n### What Appendix E Likely Contains\n\nBased on the table of contents entry and the paper's methodology (which emphasizes contrasting \"unstable\" vs. \"robust\" agent behavior, as shown in Figure 1), the Case Studies section almost certainly contains detailed trajectory traces showing agent tool-call sequences under pe",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "thinking",
+   "text": "The HTML is truncated. Let me try to get the PDF and read the appendices, or try to access the HTML with a different offset. Let me try to get the saved PDF from the previous download."
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/workspace/.claude/projects/-tmp-taxjudge-jlts0u1n/3b51182c-d7d9-4012-b9a2-315fb7670a3a/tool-results/webfetch-1781802752692-m35f2f.pdf', 'pages': '1-5'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "PDF pages extracted: 5 page(s) from /workspace/.claude/projects/-tmp-taxjudge-jlts0u1n/3b51182c-d7d9-4012-b9a2-315fb7670a3a/tool-results/webfetch-1781802752692-m35f2f.pdf (3.1MB)",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/workspace/.claude/projects/-tmp-taxjudge-jlts0u1n/3b51182c-d7d9-4012-b9a2-315fb7670a3a/tool-results/webfetch-1781802752692-m35f2f.pdf', 'pages': '15-20'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "PDF pages extracted: 6 page(s) from /workspace/.claude/projects/-tmp-taxjudge-jlts0u1n/3b51182c-d7d9-4012-b9a2-315fb7670a3a/tool-results/webfetch-1781802752692-m35f2f.pdf (3.1MB)",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/workspace/.claude/projects/-tmp-taxjudge-jlts0u1n/3b51182c-d7d9-4012-b9a2-315fb7670a3a/tool-results/webfetch-1781802752692-m35f2f.pdf', 'pages': '28-38'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "PDF pages extracted: 11 page(s) from /workspace/.claude/projects/-tmp-taxjudge-jlts0u1n/3b51182c-d7d9-4012-b9a2-315fb7670a3a/tool-results/webfetch-1781802752692-m35f2f.pdf (3.1MB)",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "text",
+   "text": "Now I have the critical Figure 7 and the full case study. Let me also read the remaining pages of the paper for any additional context about MiniMax-M2.7's behavior."
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/workspace/.claude/projects/-tmp-taxjudge-jlts0u1n/3b51182c-d7d9-4012-b9a2-315fb7670a3a/tool-results/webfetch-1781802752692-m35f2f.pdf', 'pages': '6-14'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "PDF pages extracted: 9 page(s) from /workspace/.claude/projects/-tmp-taxjudge-jlts0u1n/3b51182c-d7d9-4012-b9a2-315fb7670a3a/tool-results/webfetch-1781802752692-m35f2f.pdf (3.1MB)",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "text",
+   "text": "Now I have all the critical information needed. Let me compile the detailed chronological account of the agent failure.\n\n---\n\n## Detailed Chronological Account of the MiniMax-M2.7 Failure on ToolMaze Task C1_task_089 (C1/P1 — Explicit-Transient)\n\n### Source Material\n\nThe failure is documented in **Figure 7** of the paper \"When Tools Fail: Benchmarking Dynamic Replanning and Anomaly Recovery in LLM Agents\" (arXiv:2606.05806, Zhu et al., June 2026), which introduces the **ToolMaze** benchmark. The case study in Appendix E contrasts a **successful** model (Claude-Sonnet-4-6) against the **failing** model (MiniMax-M2.7) on the identical task and perturbation.\n\n---\n\n### The Task (C1_task_089)\n\nThe agent was given a natural-language shopping/general-domain request:\n\n> *\"Hi, for user_123, please reserve 1 black Sony XM5 for me using product_id p_sony_xm5_blk. The title is Untitled and the data is test. After you place the hold, please prepare the checkout from that reservation and let me know exactly when the reservation expires. Then suggest some popular alternatives in the same category, and send me an in-app notification with all the details.\"*\n\nThis is a **C1 (linear) complexity** task — a single-path DAG with no alternative tools. The expected tool-call chain is strictly sequential, with five tools in order:\n\n1. **`hold_inventory`** — Reserve the product (returns reservation_id `RESV-14729548`, expiry_time `1710000300` as a Unix timestamp, total_price $399.00)\n2. **`build_checkout_from_hold`** — Prepare checkout from the reservation hold data\n3. **`convert_datetime`** — Convert the Unix timestamp `1710000300` to a human-readable expiry time (`\"2024-03-09 16:05\"`)\n4. **`get_recommendations_popularity`** — Fetch popular alternatives in the same category\n5. **`create_document_and_alert_from_data`** — Send an in-app notification with details\n\n### The Perturbation (P1 — Explicit-Transient)\n\nThe perturbation mode is **P1**: **explicit** (a machine-readable error) and **transient** (resolves on retry). The perturbation point is index 2 in the chain — the **`convert_datetime`** tool is the designated \"victim.\"\n\nConcretely, when the agent first calls `convert_datetime(timestamp=1710000300)`, the ToolMaze Runtime Perturbation Engine intercepts the call and returns a synthetic error response:\n\n```json\n{\"error\": \"Internal Server Error\"}\n```\nwith status `\"error\"` and error_message `\"500 InternalServerError\"`. This is a clear, unambiguous HTTP 500 error — the agent receives an explicit signal that the tool call failed.\n\nBecause the perturbation is **transient**, any subsequent retry of `convert_datetime` with the same arguments would succeed normally, returning the correct output:\n```json\n{\"original_timestamp\": 1710000300, \"formatted_time\": \"2024-03-09 16:05\"}\n```\n\nThe expected recovery behavior is straightforward: detect the error, retry the same tool call, get the correct result, and continue the pipeline.\n\n---\n\n### What the Successful Agent Did (Claude-Sonnet-4-6)\n\nFor contrast, Claude-Sonnet-4-6 handled the perturbation correctly. Its execution trace, as shown in the green \"Success\" panel of Figure 7:\n\n1. Called `hold_inventory` → success\n2. Called `build_checkout_from_hold` → success\n3. Called `convert_datetime` → received the **500 InternalServerError** (perturbation hit)\n4. **Retried** `convert_datetime` with the same arguments → received the correct `\"2024-03-09 16:05\"` result\n5. Called `get_recommendations_popularity` → success\n6. Called `create_document_and_alert_from_data` → success\n\nThe judge verdict: **PASS** — \"All 5 steps completed successfully. Here is a clean summary: — Reservation - Reservation ID: RESV-14729548 - Product: Sony WH-1000XM5 (Black) — p_sony_xm5_blk - Quantity: 1 - Total Price: $399...\"\n\n---\n\n### What MiniMax-M2.7 Actually Did (The Failure)\n\nMiniMax-M2.7's execution trace, as shown in the red \"Failure\" panel of Figure 7, reveals the following sequence:\n\n1. **Called `hold_inventory`** → success (received reserva"
+  },
+  {
+   "turn": "judge",
+   "type": "text",
+   "text": "{\"evidence\": \"MiniMax-M2.7 called convert_datetime once, received a clear 500 InternalServerError response, and instead of retrying the tool (which would have succeeded on the second attempt, since the fault was transient), the agent abandoned convert_datetime entirely and moved on to downstream tools, leaving the pipeline incomplete. The judge verdict confirms: 'no retry on convert_datetime (called 1 time(s), need >=2).'\",\"reasoning\":\"The agent received an explicit, machine-readable error signal (HTTP 500) from the tool and failed to act on it appropriately. This is not Tool Feedback Neglect, which describes ignoring information *within* a tool's successful response to pursue an unrelated plan. Here, the model recognized the tool failed but did not attempt the trivially correct recovery action (a simple retry on a transient error). Tool Recovery Failure specifically covers the scenario where a tool encounters an explicit failure (e.g., HTTP 503, rate-limit timeout) and the model fails to dynamically navigate around the anomaly — neither retrying nor pivoting. MiniMax-M2.7 neither retried nor sought an alternative; it simply gave up after one failed call, which is the hallmark of Tool Recovery Failure.\",\"subtype\":\"Tool Recovery Failure\"}"
+  }
+ ],
+ "leaks": []
+}
