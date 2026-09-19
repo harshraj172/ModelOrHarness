@@ -1,0 +1,690 @@
+{
+ "id": "E32",
+ "gold": {
+  "edge": "model — tool",
+  "fault_side": "model",
+  "failure_mode": "Tool Recovery Failure",
+  "vulnerability": "Unbounded Consumption"
+ },
+ "pred": {
+  "edge": "model — tool",
+  "fault_side": "model",
+  "failure_mode": "Tool Feedback Neglect",
+  "category": "model — tool (fault: model)"
+ },
+ "evidence": "MiniMax-M2.7 followed the linear task through hold_inventory and build_checkout_from_hold, then called convert_datetime and received the explicit P1 transient error {\"error\":\"Internal Server Error\"}. It did not retry convert_datetime, and instead continued to get_recommendations_popularity and create_document_and_alert_from_data. The judge failed the run because convert_datetime was called only once, never succeeded after retry, and therefore had no successful execution in the trace.",
+ "reasoning": "I checked the main disambiguations: this is not Instruction-Grader Mismatch because the failure-aware setup and the explicit tool error made recovery discoverable to a capable agent; it is not a generic owner — model Instruction-Following or Reasoning failure because the first wrong step is specifically the response to a tool result. It is not env Service Failure because the injected P1 failure was transient and recoverable by retry, not a non-recoverable external outage; it is not context, memory, or subagent-related because there was no compaction, durable memory issue, or delegation. Within model — tool, Tool Feedback Neglect remains the best subtype over Tool Recovery Failure because the observable first failure is not a retry loop or trusting corrupted valid data; it is ignoring an explicit error signal and pushing forward without the required retry.",
+ "confidence": "high",
+ "changed": false,
+ "pre_reflection": {
+  "category": "model — tool (fault: model)",
+  "failure_mode": "Tool Feedback Neglect"
+ },
+ "dossier": "I read the ToolMaze paper (arXiv 2606.05806), Appendix E/Figure 7 in the extracted PDF text, the Hugging Face task file `perturbed_tasks/c1/C1_task_089_P1.json`, and the ToolMaze harness/judge code in the GitHub repo.\n\n## Chronological account of the MiniMax-M2.7 failure\n\n### 1. Benchmark setting\n\nThe case is ToolMaze Appendix E, Figure 7: **C1_task_089 P1 — Explicit-Transient**.\n\nToolMaze defines this as a **C1** task, meaning a single linear tool pipeline with no alternative branches. The task’s perturbation mode is **P1**, described in the paper as **explicit-transient**: the target tool returns an explicit error on its first affected call, and the intended recovery behavior is to retry the tool.\n\nFor this case, the victim tool was:\n\n```text\nconvert_datetime\n```\n\nThe perturbed response shown in Figure 7 and in the task JSON was:\n\n```json\n{\"error\": \"Internal Server Error\"}\n```\n\nThe task JSON records this first `convert_datetime` call as:\n\n```json\n\"status\": \"error\",\n\"error_message\": \"500 InternalServerError\",\n\"is_perturbed\": true\n```\n\n### 2. User task given to the agent\n\nThe user query given to the agent was:\n\n> Hi, for user_123, please reserve 1 black Sony XM5 for me using product_id p_sony_xm5_blk. The title is Untitled and the data is test. After you place the hold, please prepare the checkout from that reservation and let me know exactly when the reservation expires. Then suggest some popular alternatives in the same category, and send me an in-app notification with all the details.\n\nThe task required the agent to perform a sequence of actions:\n\n1. Reserve one black Sony XM5 product.\n2. Prepare a checkout from the reservation.\n3. Convert the reservation expiry timestamp into a readable time.\n4. Retrieve popular alternative recommendations.\n5. Send an in-app notification/document with the details.\n\n### 3. Intended tool pipeline\n\nThe C1 template for this task defines a five-node linear DAG:\n\n```text\nhold_inventory\n→ build_checkout_from_hold\n→ convert_datetime\n→ get_recommendations_popularity\n→ create_document_and_alert_from_data\n```\n\nThe relevant bindings in the template show that:\n\n- `hold_inventory` uses the user’s `product_id`, `user_id`, and `quantity`.\n- `build_checkout_from_hold` uses the hold result from `hold_inventory`.\n- `convert_datetime` uses the `expiry_time` produced by `hold_inventory`.\n- `get_recommendations_popularity` uses the held product ID and user ID.\n- `create_document_and_alert_from_data` uses the user’s `title`, `data`, `user_id`, and fixed notification settings.\n\n### 4. Expected clean/interrupted execution for P1\n\nThe task file’s expected P1 execution trace shows the following intended sequence.\n\n#### Step 1: `hold_inventory`\n\nArguments:\n\n```json\n{\n  \"product_id\": \"p_sony_xm5_blk\",\n  \"user_id\": \"user_123\",\n  \"quantity\": 1\n}\n```\n\nOutput included:\n\n```json\n{\n  \"reservation_id\": \"RESV-14729548\",\n  \"expires_in\": 300,\n  \"product_id\": \"p_sony_xm5_blk\",\n  \"quantity\": 1,\n  \"total_price\": 399.0,\n  \"expiry_time\": 1710000300\n}\n```\n\n#### Step 2: `build_checkout_from_hold`\n\nArguments used the hold data from step 1 and quantity `1`.\n\nOutput:\n\n```json\n{\n  \"reservation_id\": \"RESV-14729548\",\n  \"product_id\": \"p_sony_xm5_blk\",\n  \"quantity\": 1\n}\n```\n\n#### Step 3: first `convert_datetime` call\n\nArguments:\n\n```json\n{\n  \"timestamp\": 1710000300\n}\n```\n\nBecause this is the P1 perturbation point, the harness returned the injected explicit error:\n\n```json\n{\n  \"error\": \"Internal Server Error\"\n}\n```\n\nThis was the key feedback signal: the tool failed explicitly on its first call.\n\n#### Step 4: expected retry of `convert_datetime`\n\nThe expected recovery trace calls `convert_datetime` again with the same timestamp:\n\n```json\n{\n  \"timestamp\": 1710000300\n}\n```\n\nOn retry, because P1 is transient, the task JSON records the clean successful result:\n\n```json\n{\n  \"original_timestamp\": 1710000300,\n  \"formatted_time\": \"2024-03-09 16:05\"\n}\n```\n\n#### Step 5: `get_recommendations_popularity`\n\nExpected output included two similar products:\n\n- Sony WH-1000XM5 Headphones (Silver), product ID `p_sony_xm5_slv`, price `399.0`\n- Apple AirPods Pro 2, product ID `p_apple_airpods`, price `249.0`\n\n#### Step 6: `create_document_and_alert_from_data`\n\nExpected output included:\n\n```json\n{\n  \"message\": \"Notification sent successfully\",\n  \"notification_id\": \"NOTIFEE84C\",\n  \"user_id\": \"user_123\",\n  \"content\": \"test\",\n  \"priority\": \"medium\",\n  \"note_id\": \"NOTE18E3D\",\n  \"title\": \"Untitled\"\n}\n```\n\n### 5. What MiniMax-M2.7 did\n\nFigure 7’s red failure panel shows the MiniMax-M2.7 execution trace.\n\nThe agent called:\n\n```text\nhold_inventory\n```\n\nThen it called:\n\n```text\nbuild_checkout_from_hold\n```\n\nThen it called the perturbed victim tool:\n\n```text\nconvert_datetime\n```\n\nAt that point the harness returned the P1 injected error:\n\n```json\n{\"error\": \"Internal Server Error\"}\n```\n\nAfter receiving that explicit error, the Figure 7 trace shows that MiniMax-M2.7 did **not** call `convert_datetime` again.\n\nInstead, the shown trace continues with downstream tools:\n\n```text\nget_recommendations_popularity\ncreate_document_and_alert_from_data\n```\n\nSo the observable sequence for MiniMax-M2.7 was:\n\n```text\nhold_inventory\n→ build_checkout_from_hold\n→ convert_datetime   [P1 error: Internal Server Error]\n→ get_recommendations_popularity\n→ create_document_and_alert_from_data\n```\n\n### 6. Where the run diverged from the expected P1 trajectory\n\nThe divergence occurred immediately after the first `convert_datetime` call returned the injected explicit error.\n\nFor this P1 task, the expected trace contains a second `convert_datetime` call after the first failed one. Figure 7 reports that MiniMax-M2.7 called `convert_datetime` only once.\n\nThe judge’s failure message in Figure 7 was:\n\n```text\nFAIL P1 failed: no retry on 'convert_datetime' (called 1 time(s), need >=2);\n'convert_datetime' never succeeded after retries;\nmissing required tools: ['convert_datetime']\n```\n\nThe “missing required tools” part corresponds to the judge counting successful tool executions: the only observed `convert_datetime` call in the MiniMax trace was the perturbed failed call, so there was no successful `convert_datetime` execution in the trace.\n\n### 7. Final outcome\n\nThe run was marked failed.\n\nThe final reported failure was that MiniMax-M2.7 did not retry the transiently failing `convert_datetime` tool, so the victim tool never produced the clean formatted expiry time. The agent proceeded to later tools after the failed conversion, and the benchmark judge recorded the case as:\n\n```text\nFAIL P1 failed\n```\n\nwith the specific reasons:\n\n```text\nno retry on 'convert_datetime' (called 1 time(s), need >=2);\n'convert_datetime' never succeeded after retries;\nmissing required tools: ['convert_datetime']\n```",
+ "trajectory": [
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebSearch",
+   "input": "{'query': 'ToolMaze App. E Fig. 7 C1_task_089 convert_datetime MiniMax-M2.7'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "API Error: 400 litellm.BadRequestError: AzureException BadRequestError - Invalid value for 'tool_choice': 'tool_choice' is only allowed when 'tools' are specified.. Received Model Group=azure_ai/gpt-5.5\nAvailable Model Group Fallbacks=['gpt-5.5']\nError doing the fallback: litellm.BadRequestError: OpenAIException - {\n  \"error\": {\n    \"message\": \"Invalid value: 'auto'. Supported values are: 'code_interpreter', 'programmatic_tool_calling', 'function', 'namespace', 'tool_search', 'file_search', 'web_search_preview', 'web_search_preview_2025_03_11', 'image_generation', 'mcp', 'custom', 'computer', 'computer_use_preview', 'shell', and 'apply_patch'.\",\n    \"type\": \"invalid_request_error\",\n    \"param\": \"tool_choice.type\",\n    \"code\": \"invalid_value\"\n  }\n}\nNo fallback configured for model_group=gpt-5.5. Received Model Group=gpt-5.5\nAvailable Model Group Fallbacks=None\n\nDebug this request in Datadog APM: https://app.datadoghq.com/apm/traces?query=service%3Alitellm-rebuild+%40litellm.key_alias%3A%22mldg-eval-showdown%22&from=1789817602242&to=1789818202242",
+   "is_error": true
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nimport requests, urllib.parse\\nq='ToolMaze App. E Fig. 7 C1_task_089 convert_datetime MiniMax-M2.7'\\nurl='https://duckduckgo.com/html/?q='+urllib.parse.quote(q)\\nprint(requests.get(url,timeout=20,headers={'User-Agent':'Mozilla/5.0'}).text[:5000])\\nPY\", 'description': 'Search the web using DuckDuckGo HTML'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "<!-- <!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.01 Transitional//EN\" \"http://www.w3.org/TR/html4/loose.dtd\"> -->\n<!DOCTYPE html>\n<html lang=\"en\">\n\n<head>\n    <link rel=\"canonical\" href=\"https://duckduckgo.com/\">\n    <meta http-equiv=\"content-type\" content=\"text/html; charset=UTF-8\">\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, maximum-scale=3.0, user-scalable=1\">\n    <meta name=\"referrer\" content=\"origin\">\n    <title>\n        DuckDuckGo\n    </title>\n    <link rel=\"preload\" href=\"/font/ProximaNova-Reg-webfont.woff2\" as=\"font\" type=\"font/woff2\" crossorigin=\"anonymous\">\n    <link rel=\"preload\" href=\"/font/ProximaNova-Sbold-webfont.woff2\" as=\"font\" type=\"font/woff2\" crossorigin=\"anonymous\">\n    <link title=\"DuckDuckGo (Lite)\" type=\"application/opensearchdescription+xml\" rel=\"search\" href=\"//duckduckgo.com/opensearch_lite_v2.xml\">\n    <link rel=\"icon\" href=\"//duckduckgo.com/favicon.ico\" type=\"image/x-icon\"/>\n    <link id=\"icon60\" rel=\"apple-touch-icon\" href=\"//duckduckgo.com/assets/icons/meta/DDG-iOS-icon_60x60.png?v=2\"/>\n    <link id=\"icon76\" rel=\"apple-touch-icon\" sizes=\"76x76\" href=\"//duckduckgo.com/assets/icons/meta/DDG-iOS-icon_76x76.png?v=2\"/>\n    <link id=\"icon120\" rel=\"apple-touch-icon\" sizes=\"120x120\" href=\"//duckduckgo.com/assets/icons/meta/DDG-iOS-icon_120x120.png?v=2\"/>\n    <link id=\"icon152\" rel=\"apple-touch-icon\" sizes=\"152x152\" href=\"//duckduckgo.com/assets/icons/meta/DDG-iOS-icon_152x152.png?v=2\"/>\n    <link rel=\"image_src\" href=\"//duckduckgo.com/assets/icons/meta/DDG-icon_256x256.png\">\n    <link rel=\"stylesheet\" media=\"handheld, all\" href=\"//duckduckgo.com/dist/l.304bf63bbd053ee46b28.css\" type=\"text/css\"/>\n    <link rel=\"stylesheet\" media=\"handheld, all\" href=\"//duckduckgo.com/dist/lc.844e8ff9baa78da64b59.css\" type=\"text/css\"/>\n</head>\n\n<body>\n    <a name=\"top\"></a>\n    <center id=\"lite_wrapper\">\n        <br>\n        <a class=\"header-url\" href=\"/html/\">\n            <span class=\"header\">DuckDuckGo</span>\n        </a>\n        <b",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebSearch",
+   "input": "{'query': 'ToolMaze benchmark agent failures App E Figure 7'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "API Error: 400 litellm.BadRequestError: AzureException BadRequestError - Invalid value for 'tool_choice': 'tool_choice' is only allowed when 'tools' are specified.. Received Model Group=azure_ai/gpt-5.5\nAvailable Model Group Fallbacks=['gpt-5.5']\nError doing the fallback: litellm.BadRequestError: OpenAIException - {\n  \"error\": {\n    \"message\": \"Invalid value: 'auto'. Supported values are: 'code_interpreter', 'programmatic_tool_calling', 'function', 'namespace', 'tool_search', 'file_search', 'web_search_preview', 'web_search_preview_2025_03_11', 'image_generation', 'mcp', 'custom', 'computer', 'computer_use_preview', 'shell', and 'apply_patch'.\",\n    \"type\": \"invalid_request_error\",\n    \"param\": \"tool_choice.type\",\n    \"code\": \"invalid_value\"\n  }\n}\nNo fallback configured for model_group=gpt-5.5. Received Model Group=gpt-5.5\nAvailable Model Group Fallbacks=None\n\nDebug this request in Datadog APM: https://app.datadoghq.com/apm/traces?query=service%3Alitellm-rebuild+%40litellm.key_alias%3A%22mldg-eval-showdown%22&from=1789817611467&to=1789818211467",
+   "is_error": true
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'python3 - <<\\'PY\\'\\nimport requests, urllib.parse, re\\nfor q in [\\'ToolMaze App E Fig 7 task C1_task_089\\', \\'\"ToolMaze\" \"C1_task_089\"\\', \\'\"ToolMaze\" \"convert_datetime\"\\']:\\n    print(\\'QUERY\\',q)\\n    url=\\'https://www.google.com/search?q=\\'+urllib.parse.quote(q)\\n    r=requests.get(url,timeout=20,headers={\\'User-Agent\\':\\'Mozilla/5.0\\'})\\n    print(r.status_code, r.url)\\n    print(r.text[:2000])\\nPY', 'description': 'Search Google for ToolMaze references'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "QUERY ToolMaze App E Fig 7 task C1_task_089\n200 https://www.google.com/search?q=ToolMaze%20App%20E%20Fig%207%20task%20C1_task_089\n<!DOCTYPE html><html lang=\"en\"><head><title>Google Search</title><style>body{background-color:#fff}</style><script nonce=\"DdEwfjVYhX2b74VpLmFSpw\">window.google = window.google || {};window.google.c = window.google.c || {cap:0};</script></head><body><noscript><style>table,div,span,p{display:none}</style><meta content=\"0;url=/httpservice/retry/enablejs?sei=OnSuaoLwMu3a0PEPtIzaoQk\" http-equiv=\"refresh\"><div style=\"display:block\">Please click <a href=\"/httpservice/retry/enablejs?sei=OnSuaoLwMu3a0PEPtIzaoQk\">here</a> if you are not redirected within a few seconds.</div></noscript><script nonce=\"DdEwfjVYhX2b74VpLmFSpw\">(function(){var sctm=false;(function(){sctm&&google.tick(\"load\",\"pbsst\");}).call(this);})();</script><script nonce=\"DdEwfjVYhX2b74VpLmFSpw\">//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjogMywic291cmNlcyI6WyIiXSwic291cmNlc0NvbnRlbnQiOlsiICJdLCJuYW1lcyI6WyJjbG9zdXJlRHluYW1pY0J1dHRvbiJdLCJtYXBwaW5ncyI6IkFBQUE7QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBO0FBQUEifQ==\n(function(){var L=function(K){return O.call(this,1,66,3,K)},O=function(K,v,q,R,T,J,f,y,e,I){{I=21;while(I!=19)if(I==v)I=(q+5^11)>=q&&(q+6^8)<q?94:7;else if(I==94)e=R,I=7;else if(I==7)I=(q^27)>>3==K?24:87;else if(I==21)I=v;else if(I==24){a:{if(!(y=(f=S.trustedTypes,R),f)||!f.createPolicy){e=y;break a}try{y=f.createPolicy(T,{createHTML:L,createScript:L,createScriptURL:L})}catch(x){if(S.console)S.console[J](x.message)}e=y}I=87}else if(I==87)return e}},S=this||self;(0,eval)(function(K,v,q,R){return(v=O(1,66,16,null,\"ks\",(R=(R=(q=94,58),R=18,R=7,132),\"error\")))&&K.eval(v.createScript(\"1\"))===1?function(T){return v.createScript(T)}:function(T){return\"\"+(q/=218,T)}}(S)(Array(Math.random()*7824|0).join(\"\\n\")+['//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjogMywic291cmNlcyI6WyIiXSwic291cmNlc0NvbnRlbnQiOlsiICJdLCJuYW1lcyI6WyJjbG9z",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'pwd && ls', 'description': 'Show current directory contents'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "/tmp/taxjudge-3voej3ba",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Glob",
+   "input": "{'pattern': '**/*'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "No files found",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nimport requests, urllib.parse, re\\nq='ToolMaze benchmark paper arxiv'\\nurl='https://r.jina.ai/http://r.jina.ai/http://www.google.com/search?q='+urllib.parse.quote(q)\\nprint(requests.get(url,timeout=30).text[:4000])\\nPY\", 'description': 'Fetch search results through Jina proxy'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Title: http://www.google.com/search?q=ToolMaze%20benchmark%20paper%20arxiv&sei=QnSuarOAD8yh0PEPgIvC6Qc\n\nURL Source: http://www.google.com/search?q=ToolMaze%20benchmark%20paper%20arxiv\n\nWarning: This page maybe requiring CAPTCHA, please make sure you are authorized to access this page.\n\nMarkdown Content:\n**About this page**\n\nOur systems have detected unusual traffic from your computer network. This page checks to see if it's really you sending the requests, and not a robot. [Why did this happen?](http://www.google.com/search?q=ToolMaze%20benchmark%20paper%20arxiv#)\n\nIP address: 2600:1900:0:4003::1e01  \nTime: 2026-09-19T11:38:43Z  \nURL: http://www.google.com/search?q=ToolMaze%20benchmark%20paper%20arxiv&sei=QnSuarOAD8yh0PEPgIvC6Qc",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nimport requests, urllib.parse\\nfor urlbase in ['https://r.jina.ai/http://www.bing.com/search?q=', 'https://r.jina.ai/http://search.yahoo.com/search?p=']:\\n    q='ToolMaze benchmark App E Fig 7'\\n    url=urlbase+urllib.parse.quote(q)\\n    print('URL', url)\\n    r=requests.get(url,timeout=30)\\n    print(r.text[:5000])\\nPY\", 'description': 'Search Bing and Yahoo through Jina proxy'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "URL https://r.jina.ai/http://www.bing.com/search?q=ToolMaze%20benchmark%20App%20E%20Fig%207\n{\"data\":null,\"code\":403,\"name\":\"AbuseAlleviationError\",\"status\":40305,\"message\":\"Anonymous access to domain www.bing.com blocked until Sat Sep 19 2026 12:33:42 GMT+0000 (Coordinated Universal Time) due to previous abuse found on http://www.bing.com/news/apiclick.aspx?ref=FexRss&aid=&tid=6aae730fc4e54c1593ce74be3a8f5642&url=https://news.qq.com/rain/a/20260908A0BN9500&c=14908185636347199003&mkt=en-us: Suspicious action: Request to local network: http://127.0.0.1:11601/check\",\"readableMessage\":\"AbuseAlleviationError: Anonymous access to domain www.bing.com blocked until Sat Sep 19 2026 12:33:42 GMT+0000 (Coordinated Universal Time) due to previous abuse found on http://www.bing.com/news/apiclick.aspx?ref=FexRss&aid=&tid=6aae730fc4e54c1593ce74be3a8f5642&url=https://news.qq.com/rain/a/20260908A0BN9500&c=14908185636347199003&mkt=en-us: Suspicious action: Request to local network: http://127.0.0.1:11601/check\"}\nURL https://r.jina.ai/http://search.yahoo.com/search?p=ToolMaze%20benchmark%20App%20E%20Fig%207\nTitle: ToolMaze benchmark App E Fig 7\n\nURL Source: http://search.yahoo.com/search?p=ToolMaze%20benchmark%20App%20E%20Fig%207\n\nMarkdown Content:\n[Yahoo](https://r.search.yahoo.com/_ylt=A2RQdKdIdK5qjgIAtLNXNyoA/RV=2/RE=1791027528/RO=10/RU=https%3a%2f%2fwww.yahoo.com/RK=2/RS=w.CYLhpj3mn2phLcHLPZd5jnyMw-)\n\n[Settings](https://search.yahoo.com/preferences/preferences;_ylt=A2RQdKdIdK5qjgIAvLNXNyoA?pref_done=https%3A%2F%2Fsearch.yahoo.com%2Fsearch%3Fp%3DToolMaze%2Bbenchmark%2BApp%2BE%2BFig%2B7&sigpd=CCLyteoU1EJK)\n\n*   [Home](https://r.search.yahoo.com/_ylt=A2RQdKdIdK5qjgIAtbNXNyoA/RV=2/RE=1791027528/RO=10/RU=https%3a%2f%2fwww.yahoo.com%2f/RK=2/RS=6B17ddRCXIFgCEgU0YQVRL0uEZc-)\n*   [Mail](https://r.search.yahoo.com/_ylt=A2RQdKdIdK5qjgIAtrNXNyoA/RV=2/RE=1791027528/RO=10/RU=https%3a%2f%2fus.mail.yahoo.com%2f%3f.intl%3dus%26.lang%3den-US/RK=2/RS=y7yEmGcpFnP810MihruijVft.Z4-)\n*   [News](https://",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nimport requests, urllib.parse, re, json\\nq='ToolMaze C1_task_089'\\nurl='https://api.github.com/search/code?q='+urllib.parse.quote(q)\\nr=requests.get(url,headers={'Accept':'application/vnd.github+json','User-Agent':'Mozilla/5.0'},timeout=20)\\nprint(r.status_code)\\nprint(r.text[:1000])\\n# repos search\\nurl='https://api.github.com/search/repositories?q='+urllib.parse.quote('ToolMaze')\\nr=requests.get(url,headers={'Accept':'application/vnd.github+json','User-Agent':'Mozilla/5.0'},timeout=20)\\nprint('repos', r.status_code)\\nprint(r.text[:4000])\\nPY\", 'description': 'Search GitHub API for ToolMaze'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "401\n{\r\n  \"message\": \"Requires authentication\",\r\n  \"documentation_url\": \"https://docs.github.com/rest\",\r\n  \"status\": \"401\"\r\n}\nrepos 200\n{\"total_count\":1,\"incomplete_results\":false,\"items\":[{\"id\":1255148489,\"node_id\":\"R_kgDOStALyQ\",\"name\":\"ToolMaze\",\"full_name\":\"Zhudongsheng75/ToolMaze\",\"private\":false,\"owner\":{\"login\":\"Zhudongsheng75\",\"id\":59612926,\"node_id\":\"MDQ6VXNlcjU5NjEyOTI2\",\"avatar_url\":\"https://avatars.githubusercontent.com/u/59612926?v=4\",\"gravatar_id\":\"\",\"url\":\"https://api.github.com/users/Zhudongsheng75\",\"html_url\":\"https://github.com/Zhudongsheng75\",\"followers_url\":\"https://api.github.com/users/Zhudongsheng75/followers\",\"following_url\":\"https://api.github.com/users/Zhudongsheng75/following{/other_user}\",\"gists_url\":\"https://api.github.com/users/Zhudongsheng75/gists{/gist_id}\",\"starred_url\":\"https://api.github.com/users/Zhudongsheng75/starred{/owner}{/repo}\",\"subscriptions_url\":\"https://api.github.com/users/Zhudongsheng75/subscriptions\",\"organizations_url\":\"https://api.github.com/users/Zhudongsheng75/orgs\",\"repos_url\":\"https://api.github.com/users/Zhudongsheng75/repos\",\"events_url\":\"https://api.github.com/users/Zhudongsheng75/events{/privacy}\",\"received_events_url\":\"https://api.github.com/users/Zhudongsheng75/received_events\",\"type\":\"User\",\"user_view_type\":\"public\",\"site_admin\":false},\"html_url\":\"https://github.com/Zhudongsheng75/ToolMaze\",\"description\":\"When Tools Fail: Benchmarking Dynamic Replanning and Anomaly Recovery in LLM Agents\",\"fork\":false,\"url\":\"https://api.github.com/repos/Zhudongsheng75/ToolMaze\",\"forks_url\":\"https://api.github.com/repos/Zhudongsheng75/ToolMaze/forks\",\"keys_url\":\"https://api.github.com/repos/Zhudongsheng75/ToolMaze/keys{/key_id}\",\"collaborators_url\":\"https://api.github.com/repos/Zhudongsheng75/ToolMaze/collaborators{/collaborator}\",\"teams_url\":\"https://api.github.com/repos/Zhudongsheng75/ToolMaze/teams\",\"hooks_url\":\"https://api.github.com/repos/Zhudongsheng75/ToolMaze/hooks\",\"issue_events_url\":\"https://api.github.com/repos/Zh",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nimport requests, json\\nrepo='Zhudongsheng75/ToolMaze'\\nurl=f'https://api.github.com/repos/{repo}/contents/'\\nr=requests.get(url,headers={'User-Agent':'Mozilla/5.0'},timeout=20)\\nprint(r.status_code)\\nfor item in r.json():\\n    print(item['type'], item['name'], item.get('download_url'))\\nPY\", 'description': 'List ToolMaze repository contents'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "200\nfile .gitignore https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/.gitignore\nfile README.md https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/README.md\ndir evaluation None\nfile requirements.txt https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/requirements.txt\nfile run_api_eval.py https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/run_api_eval.py\nfile run_batch_api_eval.py https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/run_batch_api_eval.py\ndir toolmaze None\ndir tools None",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebFetch",
+   "input": "{'url': 'https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/README.md', 'prompt': 'Extract overview of ToolMaze, paper link if present, and any links to appendix/figures/data/trajectories.'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "## ToolMaze Overview\nToolMaze is an evaluation framework for testing LLM agents on tool-use tasks with varying complexity levels, C1–C4, and perturbation modes, P0–P4. It runs agents in a sandboxed tool environment, injects failures into tool calls, records traces, and evaluates recovery using metrics such as TSR, PRR, and RC.\n\n## Paper\n- Paper: *When Tools Fail: Benchmarking Dynamic Replanning and Anomaly Recovery in LLM Agents*\n- Link: https://arxiv.org/abs/2606.05806\n\n## Data / Dataset\n- Dataset link: https://huggingface.co/datasets/dongsheng/ToolMaze\n\n## Appendix / Figures / Trajectories\n- Appendix links: not present in the provided content.\n- Figure links: not present in the provided content.\n- Trajectory links: not present in the provided content.",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nimport requests, os, json\\nrepo='Zhudongsheng75/ToolMaze'\\n\\ndef list_dir(path=''):\\n    url=f'https://api.github.com/repos/{repo}/contents/{path}'\\n    r=requests.get(url,headers={'User-Agent':'Mozilla/5.0'},timeout=20)\\n    print('\\\\nDIR', path, r.status_code)\\n    for item in r.json():\\n        print(item['type'], item['path'], item.get('download_url'))\\n        if item['type']=='dir' and path.count('/')<2:\\n            pass\\nfor path in ['', 'evaluation', 'toolmaze', 'tools']:\\n    list_dir(path)\\nPY\", 'description': 'List top-level ToolMaze subdirectories'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "DIR  200\nfile .gitignore https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/.gitignore\nfile README.md https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/README.md\ndir evaluation None\nfile requirements.txt https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/requirements.txt\nfile run_api_eval.py https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/run_api_eval.py\nfile run_batch_api_eval.py https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/run_batch_api_eval.py\ndir toolmaze None\ndir tools None\n\nDIR evaluation 200\nfile evaluation/README.md https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/evaluation/README.md\ndir evaluation/agents None\ndir evaluation/configs None\ndir evaluation/core None\nfile evaluation/requirements.txt https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/evaluation/requirements.txt\ndir evaluation/scripts None\ndir evaluation/utils None\n\nDIR toolmaze 200\nfile toolmaze/__init__.py https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/toolmaze/__init__.py\ndir toolmaze/core None\n\nDIR tools 200\nfile tools/README.md https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/tools/README.md\nfile tools/__init__.py https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/tools/__init__.py\nfile tools/alternatives_loader.py https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/tools/alternatives_loader.py\ndir tools/definitions None\nfile tools/loader.py https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/tools/loader.py\ndir tools/plugins None",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nimport requests\\nrepo='Zhudongsheng75/ToolMaze'\\npaths=['evaluation/agents','evaluation/configs','evaluation/core','evaluation/scripts','evaluation/utils','tools/definitions','tools/plugins','toolmaze/core']\\nfor path in paths:\\n    r=requests.get(f'https://api.github.com/repos/{repo}/contents/{path}',headers={'User-Agent':'Mozilla/5.0'},timeout=20)\\n    print('\\\\nDIR', path, r.status_code)\\n    for item in r.json(): print(item['type'], item['path'], item.get('download_url'))\\nPY\", 'description': 'List nested ToolMaze directories'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "<persisted-output>\nOutput too large (45.5KB). Full output saved to: /mnt/efs/razvan-gabrieldumitru/.claude/projects/-tmp-taxjudge-3voej3ba/5208ad39-6544-4cf9-915c-6bceffd516f6/tool-results/bafsly79h.txt\n\nPreview (first 2KB):\nDIR evaluation/agents 200\nfile evaluation/agents/__init__.py https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/evaluation/agents/__init__.py\nfile evaluation/agents/anthropic_agent.py https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/evaluation/agents/anthropic_agent.py\nfile evaluation/agents/base_agent.py https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/evaluation/agents/base_agent.py\nfile evaluation/agents/mcp_agent.py https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/evaluation/agents/mcp_agent.py\nfile evaluation/agents/openai_agent.py https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/evaluation/agents/openai_agent.py\nfile evaluation/agents/vllm_agent.py https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/evaluation/agents/vllm_agent.py\n\nDIR evaluation/configs 200\nfile evaluation/configs/eval_config.yaml https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/evaluation/configs/eval_config.yaml\nfile evaluation/configs/openai_eval_config_c1.yaml https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/evaluation/configs/openai_eval_config_c1.yaml\n\nDIR evaluation/core 200\nfile evaluation/core/__init__.py https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/evaluation/core/__init__.py\nfile evaluation/core/judge.py https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/evaluation/core/judge.py\nfile evaluation/core/metrics.py https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/evaluation/core/metrics.py\nfile evaluation/core/sandbox.py https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/evaluation/core/sandbox.py\n\nDIR evaluation/scripts 200\nfile evaluation/scripts/batch_eval.sh https://raw.githubusercontent.com/Zhudongshe",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nimport requests, json\\nrepo='Zhudongsheng75/ToolMaze'\\nr=requests.get(f'https://api.github.com/repos/{repo}/git/trees/main?recursive=1',headers={'User-Agent':'Mozilla/5.0'},timeout=30)\\nprint(r.status_code)\\ndata=r.json()['tree']\\nfor item in data:\\n    p=item['path']\\n    if any(s in p.lower() for s in ['task_089','c1_task','trace','trajectory','minimax','fig','app','result','jsonl','json']):\\n        print(item['type'], p)\\nPY\", 'description': 'Search repository tree for task and trace files'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "200\ntree evaluation/configs\nblob evaluation/configs/eval_config.yaml\nblob evaluation/configs/openai_eval_config_c1.yaml\nblob evaluation/utils/result_saver.py\nblob evaluation/utils/trace_logger.py\nblob tools/plugins/apply_connected_lock_pass_native.py\nblob tools/plugins/apply_discovered_lock_ticket_native.py\nblob tools/plugins/apply_light_bridge_scene_native.py\nblob tools/plugins/apply_light_brightness.py\nblob tools/plugins/apply_light_mesh_scene_native.py\nblob tools/plugins/apply_lock_state.py\nblob tools/plugins/build_device_config_request.py\nblob tools/plugins/update_device_config.py",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebFetch",
+   "input": "{'url': 'https://huggingface.co/datasets/dongsheng/ToolMaze', 'prompt': 'Summarize dataset repository structure: splits/files available, and note any files likely containing trajectories or C1_task_089.'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "- Repository: `dongsheng/ToolMaze` on Hugging Face Datasets.\n- Dataset size category: `\"1K<n<10K\"`.\n- Storage/file area: a `\"Files and versions\"` tab is present and marked `\"xet\"`, but no actual file list is shown in the provided page content.\n- Total file size: 119 MB.\n- Viewer structure shown:\n  - Subset: `\"default\"`\n  - Split: `\"train\"`\n- Dataset Viewer status: unavailable for the train split due to a `StreamingRowsError` / schema-casting issue.\n\nLikely trajectory-related content:\n- The error trace exposes nested per-step fields such as `\"step\"`, `\"tool_name\"`, `\"arguments\"`, `\"output\"`, `\"status\"`, `\"error_message\"`, and `\"is_perturbed\"`, which strongly suggests the train data contains tool-use execution traces or trajectory-like records.\n\nAbout `C1_task_089`:\n- The provided content mentions C1/C2/C3/C4 task categories, but it does not show any filename or row explicitly containing `C1_task_089`.\n- If present, it is most likely inside the train data files behind the `\"Files and versions\"` tab, but the exact file cannot be identified from the supplied page text.",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nimport requests, json\\nbase='https://huggingface.co/api/datasets/dongsheng/ToolMaze/tree/main'\\nr=requests.get(base,headers={'User-Agent':'Mozilla/5.0'},timeout=20)\\nprint(r.status_code)\\nprint(r.text[:5000])\\nPY\", 'description': 'List Hugging Face dataset files via API'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "200\n[{\"type\":\"directory\",\"oid\":\"655cecb1fdbef2c418d3d2c4423903220064e838\",\"size\":0,\"path\":\"perturbed_tasks\"},{\"type\":\"directory\",\"oid\":\"e67293a7c1dce4f20d664f1525f11140f0e89f16\",\"size\":0,\"path\":\"tasks\"},{\"type\":\"directory\",\"oid\":\"aad4d91a400e1ef32dec7dbdd375256b689680b9\",\"size\":0,\"path\":\"templates\"},{\"type\":\"file\",\"oid\":\"bed0738c7eeb449bca98b5d2f33c89a1ee56349a\",\"size\":2504,\"path\":\".gitattributes\"},{\"type\":\"file\",\"oid\":\"cf63167ac72f4bb05f1845233a7ef7f11bb4c7a4\",\"size\":934,\"path\":\"README.md\"}]",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nimport requests, json, urllib.parse\\nfor path in ['tasks','perturbed_tasks','templates']:\\n    url='https://huggingface.co/api/datasets/dongsheng/ToolMaze/tree/main/'+path\\n    r=requests.get(url,headers={'User-Agent':'Mozilla/5.0'},timeout=20)\\n    print('\\\\nDIR', path, r.status_code)\\n    data=r.json()\\n    print('count', len(data))\\n    for item in data[:100]: print(item['type'], item['path'], item.get('size'))\\nPY\", 'description': 'List dataset subdirectories via API'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "DIR tasks 200\ncount 4\ndirectory tasks/c1 0\ndirectory tasks/c2 0\ndirectory tasks/c3 0\ndirectory tasks/c4 0\n\nDIR perturbed_tasks 200\ncount 5\ndirectory perturbed_tasks/c1 0\ndirectory perturbed_tasks/c2 0\ndirectory perturbed_tasks/c3 0\ndirectory perturbed_tasks/c4 0\nfile perturbed_tasks/clean_banned_tools.py 2366\n\nDIR templates 200\ncount 4\ndirectory templates/c1 0\ndirectory templates/c2 0\ndirectory templates/c3 0\ndirectory templates/c4 0",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nimport requests, os, json\\nfor path in ['tasks/c1','perturbed_tasks/c1','templates/c1']:\\n    url='https://huggingface.co/api/datasets/dongsheng/ToolMaze/tree/main/'+path\\n    r=requests.get(url,headers={'User-Agent':'Mozilla/5.0'},timeout=20)\\n    print('\\\\nDIR', path, r.status_code)\\n    data=r.json(); print('count', len(data))\\n    for item in data[:200]: print(item['type'], item['path'], item.get('size'))\\nPY\", 'description': 'List C1 dataset directories'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "DIR tasks/c1 200\ncount 100\nfile tasks/c1/C1_task_001.json 6606\nfile tasks/c1/C1_task_002.json 6708\nfile tasks/c1/C1_task_003.json 7001\nfile tasks/c1/C1_task_004.json 6495\nfile tasks/c1/C1_task_005.json 8261\nfile tasks/c1/C1_task_006.json 7082\nfile tasks/c1/C1_task_007.json 7622\nfile tasks/c1/C1_task_008.json 5706\nfile tasks/c1/C1_task_009.json 6589\nfile tasks/c1/C1_task_010.json 5942\nfile tasks/c1/C1_task_011.json 6853\nfile tasks/c1/C1_task_012.json 5920\nfile tasks/c1/C1_task_013.json 7078\nfile tasks/c1/C1_task_014.json 6330\nfile tasks/c1/C1_task_015.json 6754\nfile tasks/c1/C1_task_016.json 7576\nfile tasks/c1/C1_task_017.json 5639\nfile tasks/c1/C1_task_018.json 6805\nfile tasks/c1/C1_task_019.json 6211\nfile tasks/c1/C1_task_020.json 7074\nfile tasks/c1/C1_task_021.json 10204\nfile tasks/c1/C1_task_022.json 6872\nfile tasks/c1/C1_task_023.json 5132\nfile tasks/c1/C1_task_024.json 7952\nfile tasks/c1/C1_task_025.json 5821\nfile tasks/c1/C1_task_026.json 5809\nfile tasks/c1/C1_task_027.json 6101\nfile tasks/c1/C1_task_028.json 6330\nfile tasks/c1/C1_task_029.json 6015\nfile tasks/c1/C1_task_030.json 10488\nfile tasks/c1/C1_task_031.json 6525\nfile tasks/c1/C1_task_032.json 10296\nfile tasks/c1/C1_task_033.json 6300\nfile tasks/c1/C1_task_034.json 8273\nfile tasks/c1/C1_task_035.json 10927\nfile tasks/c1/C1_task_036.json 7213\nfile tasks/c1/C1_task_037.json 5785\nfile tasks/c1/C1_task_038.json 4947\nfile tasks/c1/C1_task_039.json 10903\nfile tasks/c1/C1_task_040.json 7594\nfile tasks/c1/C1_task_041.json 11045\nfile tasks/c1/C1_task_042.json 4510\nfile tasks/c1/C1_task_043.json 7809\nfile tasks/c1/C1_task_044.json 5823\nfile tasks/c1/C1_task_045.json 6779\nfile tasks/c1/C1_task_046.json 6107\nfile tasks/c1/C1_task_047.json 9586\nfile tasks/c1/C1_task_048.json 5263\nfile tasks/c1/C1_task_049.json 5949\nfile tasks/c1/C1_task_050.json 5946\nfile tasks/c1/C1_task_051.json 10406\nfile tasks/c1/C1_task_052.json 10947\nfile tasks/c1/C1_task_053.json 7424\nfile tasks/c1/C1_task_054.json 8355\nfile tasks/c1/C1_task",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nimport requests\\nurl='https://arxiv.org/pdf/2606.05806'\\nr=requests.get(url,timeout=30,headers={'User-Agent':'Mozilla/5.0'})\\nprint(r.status_code, r.headers.get('content-type'), len(r.content))\\nopen('/tmp/toolmaze.pdf','wb').write(r.content)\\nPY\\npdftotext /tmp/toolmaze.pdf - | python3 - <<'PY'\\nimport sys\\ntext=sys.stdin.read()\\nprint(text[:20000])\\nPY\", 'description': 'Download ToolMaze paper and extract text'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Exit code 1\n200 application/pdf 3287255\nTraceback (most recent call last):\n  File \"<stdin>\", line 5, in <module>\nPermissionError: [Errno 13] Permission denied: '/tmp/toolmaze.pdf'\n  File \"<stdin>\", line 3\n    Dongsheng Zhu1 * , Xuchen Ma2∗ , Yucheng Shen3 , Xiang Li2 , Yukun Zhao4 ,\n                                 ^\nSyntaxError: invalid character '∗' (U+2217)",
+   "is_error": true
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nimport requests, pathlib\\nurl='https://arxiv.org/pdf/2606.05806'\\nr=requests.get(url,timeout=30,headers={'User-Agent':'Mozilla/5.0'})\\nprint(r.status_code, r.headers.get('content-type'), len(r.content))\\npath='/mnt/efs/razvan-gabrieldumitru/toolmaze.pdf'\\nopen(path,'wb').write(r.content)\\nprint(path)\\nPY\\npdftotext /mnt/efs/razvan-gabrieldumitru/toolmaze.pdf /mnt/efs/razvan-gabrieldumitru/toolmaze.txt\\npython3 - <<'PY'\\nfrom pathlib import Path\\ntext=Path('/mnt/efs/razvan-gabrieldumitru/toolmaze.txt').read_text(errors='ignore')\\nprint(text[:12000])\\nPY\", 'description': 'Download ToolMaze paper and extract text to home'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "200 application/pdf 3287255\n/mnt/efs/razvan-gabrieldumitru/toolmaze.pdf\nWhen Tools Fail: Benchmarking Dynamic Replanning and Anomaly\nRecovery in LLM Agents\nDongsheng Zhu1 * , Xuchen Ma2∗ , Yucheng Shen3 , Xiang Li2 , Yukun Zhao4 ,\nShuaiqiang Wang5 , Lingyong Yan5† , Dawei Yin5\n1\n\nShanghai AI Laboratory 2 East China Normal University\n3\nSoochow University 4 Shandong University 5 Baidu Inc.\nzhudongsheng@pjlab.org.cn\n\nxuchenma@stu.ecnu.edu.cn\n\narXiv:2606.05806v1 [cs.AI] 4 Jun 2026\n\nAbstract\nExisting benchmarks evaluate Tool-Integrated\nReasoning (TIR) in LLMs on idealized “happy\npaths”, largely overlooking real-world tool failures. We introduce T OOL M AZE, a benchmark\nfor dynamic path discovery and error recovery in TIR agents. To separate systematic\nreplanning from blind trial-and-error, T OOL M AZE adopts a two-dimensional design: DAGbased topological complexity and a 2 × 2\ntaxonomy of tool perturbations (explicit/implicit, transient/permanent). Evaluations show\nthat perturbations degrade performance across\nnearly all models, with the sharpest drops\nunder implicit semantic failures. Driven by\nsystemic over-trust in corrupted outputs, Perturbation Recovery Rate (PRR) plummets by\naround 37% in these scenarios, while complex\ntopologies trap agents in futile trial-and-error\nloops. Crucially, agentic fault-tolerance improves with model scale 3.66× slower than\nbasic task execution, highlighting dynamic replanning as a distinct bottleneck unaddressed\nby model scaling or prompting. Data and\ncode are available at https://github.com/\nZhudongsheng75/ToolMaze.\n\n1\n\nIntroduction\n\nIntegrating external tools has transformed LLMs\nfrom static knowledge repositories into ToolIntegrated Reasoning (TIR) agents (Schick et al.,\n2023; Qin et al., 2023). However, prevailing benchmarks (Li et al., 2023; Zhuang et al., 2023; Guo\net al., 2024) evaluate these capabilities under a\n\"happy path\" fallacy, implicitly assuming perfectly\nstable and truthful environments. Real-world tool\nexecution, by co",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nimport requests, collections\\nq=['']\\nseen=[]\\nwhile q:\\n    path=q.pop(0)\\n    url='https://huggingface.co/api/datasets/dongsheng/ToolMaze/tree/main' + (('/'+path) if path else '')\\n    r=requests.get(url,headers={'User-Agent':'Mozilla/5.0'},timeout=20)\\n    if r.status_code!=200:\\n        print('ERR', path, r.status_code, r.text[:200]); continue\\n    data=r.json()\\n    for item in data:\\n        seen.append(item)\\n        if item['type']=='directory': q.append(item['path'])\\nprint('total items', len(seen))\\nfor item in seen:\\n    p=item['path']\\n    if any(s in p.lower() for s in ['result','trace','minimax','task_089','fig','appendix','trajectory','run']):\\n        print(item['type'], p, item.get('size'))\\n# count top dirs\\nprint('top dirs', sorted(set(x['path'].split('/')[0] for x in seen)))\\nPY\", 'description': 'Recursively list Hugging Face dataset tree'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "total items 2818\nfile perturbed_tasks/c1/C1_task_089_P0.json 10236\nfile perturbed_tasks/c1/C1_task_089_P1.json 10959\nfile perturbed_tasks/c1/C1_task_089_P2.json 10313\nfile perturbed_tasks/c1/C1_task_089_P3.json 11025\nfile perturbed_tasks/c1/C1_task_089_P4.json 10380\nfile perturbed_tasks/c2/C2_task_089_P0.json 25099\nfile perturbed_tasks/c2/C2_task_089_P1.json 34575\nfile perturbed_tasks/c2/C2_task_089_P2.json 30270\nfile perturbed_tasks/c2/C2_task_089_P3.json 36086\nfile perturbed_tasks/c2/C2_task_089_P4.json 31759\nfile perturbed_tasks/c3/C3_task_089_P0.json 17044\nfile perturbed_tasks/c3/C3_task_089_P1.json 23428\nfile perturbed_tasks/c3/C3_task_089_P2.json 21122\nfile perturbed_tasks/c3/C3_task_089_P3.json 24548\nfile perturbed_tasks/c3/C3_task_089_P4.json 21936\nfile perturbed_tasks/c4/C4_task_089_P0.json 76912\nfile perturbed_tasks/c4/C4_task_089_P1.json 108250\nfile perturbed_tasks/c4/C4_task_089_P2.json 81423\nfile perturbed_tasks/c4/C4_task_089_P3.json 117200\nfile perturbed_tasks/c4/C4_task_089_P4.json 92840\nfile tasks/c1/C1_task_089.json 8096\nfile tasks/c2/C2_task_089.json 24901\nfile tasks/c3/C3_task_089.json 16750\nfile tasks/c4/C4_task_089.json 76462\ntop dirs ['.gitattributes', 'README.md', 'perturbed_tasks', 'tasks', 'templates']",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nfrom pathlib import Path\\ntext=Path('/mnt/efs/razvan-gabrieldumitru/toolmaze.txt').read_text(errors='ignore')\\nterms=['Appendix E','Figure 7','C1_task_089','MiniMax','convert_datetime','App. E','C1/P1']\\nfor term in terms:\\n    print('\\\\nTERM',term)\\n    idx=text.lower().find(term.lower())\\n    print('idx', idx)\\n    if idx!=-1:\\n        print(text[max(0,idx-2000):idx+5000])\\nPY\", 'description': 'Search extracted paper text for appendix and task terms'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "TERM Appendix E\nidx -1\n\nTERM Figure 7\nidx 57048\n. **Step-by-Step Verification** (Internal checklist verify before outputting):\n- Step 1: Does my description request this action?\nYES/NO\n- Step 2: Does my description request this action?\nYES/NO\n- Step 3: Does my description request this action?\nYES/NO\n- ... (for all N steps)\n- If ANY answer is NO, rewrite the description to\ninclude that step.\n3. **FORBIDDEN - Past Tense / Completed Actions**:\nNEVER use: \"I’ve already...\", \"I just...\", \"My ... is\nconfirmed\"\nNEVER imply actions are already done: \"my booking\", \"the reservation I made\"\nALWAYS use future/imperative: \"Please...\", \"I need\nto...\", \"Help me...\"\n4. **REQUIRED - Dependency Expression**:\n- If step B uses output from step A, use connecting\nwords: \"then\", \"after that\", \"and then\"\n- Example: \"Book a flight, then get the flight details,\nand send them to me\"\n- NOT: \"Send me the flight details\" (missing book\nstep)\n5. **Natural Language**:\n- Do NOT mention tool names, schemas, or technical\nterms\n- Keep it realistic and concise (1-3 sentences)\n- Use the same language as the trace content\n- ONLY use facts from the trace blocks - do NOT\ninvent details\n6. **Verification Before Output**:\n- Count the steps in the trace: N steps\n- Count the actions in your description: M actions\n- If M < N, you MUST rewrite to include all steps\n- If M = N, verify each action maps to a step\ndomains: {domains}\nlanguage_hint: {language_hint}\nYou will receive the trace blocks next (one per message).\n**REMEMBER**: Your description must request\nALL {num_steps} steps. Do not skip any step.\nOutput ONLY the user request text.\n\nTable 6: Evaluation prompt for P1-P4, which hints the\npossibility of tool failures or the corresponding recovery\nstrategies.\n\nD\n\nFull Results\n\nTable 20 shows results over perturbation modes.\nThe full results of all models evaluated across C1C4, TSR (NP) and P1-P4 are shown in Table 21\nand Table 22.\n\nE\n\nCase Studies\n\nTo provide a qualitative understanding of LLM’s\nbehavioral patte",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nimport requests, json, pprint, pathlib\\nbase='https://huggingface.co/datasets/dongsheng/ToolMaze/resolve/main/'\\nfor path in ['tasks/c1/C1_task_089.json','perturbed_tasks/c1/C1_task_089_P1.json','templates/c1/C1_template_089.json']:\\n    url=base+path\\n    r=requests.get(url,headers={'User-Agent':'Mozilla/5.0'},timeout=20)\\n    print('\\\\nPATH',path,'status',r.status_code,'len',len(r.text))\\n    print(r.text[:2000])\\n    pathlib.Path('/mnt/efs/razvan-gabrieldumitru/'+path.replace('/','_')).write_text(r.text)\\nPY\", 'description': 'Fetch task and perturbation JSON files'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "PATH tasks/c1/C1_task_089.json status 200 len 8084\n{\n    \"task_id\": \"C1_task_089\",\n    \"template_id\": \"C1_template_089\",\n    \"complexity\": \"C1\",\n    \"task_description\": \"Please check the weather in Tokyo, then create a travel weather brief with the current conditions and send it to me in the app. After that, book a deluxe room at Grand Tokyo Hotel for January 10 to January 12, 2026 under the name “Travel Weather Brief,” and then send a high-priority app alert to alice saying the hotel was booked successfully.\",\n    \"user_input\": {\n        \"query\": \"Please check the current weather in Tokyo and create a travel weather brief with the current conditions titled “Travel Weather Brief,” then send it to me in the app for user_id traveler_42. After that, book a deluxe room at Grand Tokyo Hotel from 2026-01-10 to 2026-01-12 under the name “Travel Weather Brief.” Once the booking is confirmed, send a high-priority app alert to alice letting them know the hotel was booked successfully.\",\n        \"check_in_date\": \"2026-01-10\",\n        \"check_out_date\": \"2026-01-12\",\n        \"city\": \"Tokyo\",\n        \"contact_name\": \"alice\",\n        \"hotel_name\": \"Grand Tokyo Hotel\",\n        \"room_type\": \"deluxe\",\n        \"title\": \"Travel Weather Brief\",\n        \"user_id\": \"traveler_42\"\n    },\n    \"execution_trace\": [\n        {\n            \"step\": 1,\n            \"tool_name\": \"get_weather_visualcrossing\",\n            \"arguments\": {\n                \"city\": \"Tokyo\"\n            },\n            \"output\": {\n                \"temperature_celsius\": 22,\n                \"condition\": \"Sunny\"\n            },\n            \"status\": \"success\"\n        },\n        {\n            \"step\": 2,\n            \"tool_name\": \"build_weather_data_payload\",\n            \"arguments\": {\n                \"weather_data\": {\n                    \"temperature_celsius\": 22,\n                    \"condition\": \"Sunny\"\n                },\n                \"city\": \"Tokyo\",\n                \"title\": \"Travel Weather Brief\",\n                \"user_id\": \"t",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/mnt/efs/razvan-gabrieldumitru/perturbed_tasks_c1_C1_task_089_P1.json'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "1\t{\n2\t    \"task_id\": \"C1_task_089\",\n3\t    \"template_id\": \"C1_template_089\",\n4\t    \"complexity\": \"C1\",\n5\t    \"task_description\": \"Please reserve 1 black Sony XM5 for me, then prepare the checkout from that hold and tell me when the reservation expires. After that, suggest some popular alternatives in the same category, and send me an in-app notification with the details.\",\n6\t    \"user_input\": {\n7\t        \"query\": \"Hi, for user_123, please reserve 1 black Sony XM5 for me using product_id p_sony_xm5_blk. The title is Untitled and the data is test. After you place the hold, please prepare the checkout from that reservation and let me know exactly when the reservation expires. Then suggest some popular alternatives in the same category, and send me an in-app notification with all the details.\",\n8\t        \"data\": \"test\",\n9\t        \"product_id\": \"p_sony_xm5_blk\",\n10\t        \"quantity\": 1,\n11\t        \"title\": \"Untitled\",\n12\t        \"user_id\": \"user_123\"\n13\t    },\n14\t    \"execution_trace\": [\n15\t        {\n16\t            \"step\": 1,\n17\t            \"tool_name\": \"hold_inventory\",\n18\t            \"arguments\": {\n19\t                \"product_id\": \"p_sony_xm5_blk\",\n20\t                \"user_id\": \"user_123\",\n21\t                \"quantity\": 1\n22\t            },\n23\t            \"output\": {\n24\t                \"reservation_id\": \"RESV-14729548\",\n25\t                \"expires_in\": 300,\n26\t                \"product_id\": \"p_sony_xm5_blk\",\n27\t                \"quantity\": 1,\n28\t                \"total_price\": 399.0,\n29\t                \"expiry_time\": 1710000300,\n30\t                \"reservation_details\": {\n31\t                    \"product_id\": \"p_sony_xm5_blk\",\n32\t                    \"quantity\": 1,\n33\t                    \"total_price\": 399.0\n34\t                }\n35\t            },\n36\t            \"status\": \"success\"\n37\t        },\n38\t        {\n39\t            \"step\": 2,\n40\t            \"tool_name\": \"build_checkout_from_hold\",\n41\t            \"arguments\": {\n42\t                \"hold_data\": {\n43\t                    \"",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nimport requests, json\\napi='https://huggingface.co/api/datasets/dongsheng/ToolMaze'\\nr=requests.get(api,headers={'User-Agent':'Mozilla/5.0'},timeout=20)\\nprint(r.status_code)\\nprint(r.text[:8000])\\nPY\", 'description': 'Fetch Hugging Face dataset metadata'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Exit code 1\n200\n{\"_id\":\"6a1cfb033647a19350da68f7\",\"id\":\"dongsheng/ToolMaze\",\"author\":\"dongsheng\",\"sha\":\"08b0239a98b0b07839d673f5bc0ef7d836db9296\",\"lastModified\":\"2026-06-05T07:18:08.000Z\",\"private\":false,\"gated\":false,\"disabled\":false,\"tags\":[\"size_categories:1K<n<10K\",\"arxiv:2606.05806\",\"region:us\"],\"description\":\"\\n\\t\\n\\t\\t\\n\\t\\n\\t\\n\\t\\tToolMaze\\n\\t\\n\\nThis project is from the paper \\\"When Tools Fail: Benchmarking Dynamic Replanning and Anomaly Recovery in LLM Agents\\n\\\". \\nEvaluation framework for testing LLM agents on C1/C2/C3/C4 tool-use tasks\\nunder P0–P4 perturbation modes. The framework runs an agent inside a\\nsandboxed tool runtime, intercepts tool calls to inject perturbations, and\\nscores the result with a complexity-aware judge.\\n\\n\\t\\n\\t\\t\\n\\t\\n\\t\\n\\t\\tCitation\\n\\t\\n\\n@misc{zhu2026toolsfailbenchmarkingdynamic,\\n      title={When… See the full description on the dataset page: https://huggingface.co/datasets/dongsheng/ToolMaze.\",\"downloads\":438,\"likes\":5,\"cardData\":{\"size_categories\":[\"1K<n<10K\"]},\"siblings\":[{\"rfilename\":\".gitattributes\"},{\"rfilename\":\"README.md\"},{\"rfilename\":\"perturbed_tasks/c1/C1_task_001_P0.json\"},{\"rfilename\":\"perturbed_tasks/c1/C1_task_001_P1.json\"},{\"rfilename\":\"perturbed_tasks/c1/C1_task_001_P2.json\"},{\"rfilename\":\"perturbed_tasks/c1/C1_task_001_P3.json\"},{\"rfilename\":\"perturbed_tasks/c1/C1_task_001_P4.json\"},{\"rfilename\":\"perturbed_tasks/c1/C1_task_002_P0.json\"},{\"rfilename\":\"perturbed_tasks/c1/C1_task_002_P1.json\"},{\"rfilename\":\"perturbed_tasks/c1/C1_task_002_P2.json\"},{\"rfilename\":\"perturbed_tasks/c1/C1_task_002_P3.json\"},{\"rfilename\":\"perturbed_tasks/c1/C1_task_002_P4.json\"},{\"rfilename\":\"perturbed_tasks/c1/C1_task_003_P0.json\"},{\"rfilename\":\"perturbed_tasks/c1/C1_task_003_P1.json\"},{\"rfilename\":\"perturbed_tasks/c1/C1_task_003_P2.json\"},{\"rfilename\":\"perturbed_tasks/c1/C1_task_003_P3.json\"},{\"rfilename\":\"perturbed_tasks/c1/C1_task_003_P4.json\"},{\"rfilename\":\"perturbed_tasks/c1/C1_task_004_P0.json\"},{\"rfilename\":\"perturbed_tas",
+   "is_error": true
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nfrom pathlib import Path\\ntext=Path('/mnt/efs/razvan-gabrieldumitru/toolmaze.txt').read_text(errors='ignore')\\npages=text.split('\\\\f')\\nfor i,p in enumerate(pages,1):\\n    if 'Figure 7: C1 P1' in p or 'C1_task_089 P1' in p:\\n        print('page',i,'chars',len(p))\\n        print(p[:4000])\\nPY\", 'description': 'Find PDF page containing Figure 7'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "page 29 chars 2988\nCase C1\n\nC1_task_089 P1 — Explicit-Transient\n\nHi, for user_123, please reserve 1 black\nSony XM5 for me using product_id\np_sony_xm5_blk. The title is Untitled and\nthe data is test. After you place the hold,\nplease prepare the checkout from that reservation and let me know exactly when the\nreservation ex...\n\n✓ Success claude-sonnet-4-6\n\nhold_inventory\nbuild_checkout_\nfrom_hold\nconvert_\ndatetime ×\n\nbuild_checkout_\nfrom_hold\n\nget_recommendations_\npopularity\n\ncreate_document_\nand_alert_from_data\n\n! P1\nconvert_datetime\n\nretry ✓\nconvert_datetime\n\nPASS All 5 steps completed successfully. Here is a clean summary: — Reservation - Reservation ID: RESV-14729548\n- Product: Sony WH-1000XM5 (Black) — p_sony_xm5_blk - Quantity: 1 - Total Price: $399....\n\n× Failure MiniMax-M2.7\n\nget_\nrecommendations_\npopularity\ncreate_document_\nand_alert_\nfrom_data\n\nhold_inventory\n\nbuild_checkout_\nfrom_hold\n\nhold_inventory\n\n! P1\nconvert_datetime\n\nget_recommendations_\npopularity\n\ncreate_document_\nand_alert_from_data\nFAIL P1 failed: no retry on ’convert_datetime’ (called 1 time(s), need >=2); ’convert_datetime’ never succeeded\nafter retries; missing required tools: [’convert_datetime’]\n\nPerturbed output: —\nconvert_datetime: {”error”:\n”Internal Server Error”}\n\nFigure 7: C1 P1 — Explicit-Transient (C1_task_089). The victim tool convert_datetime returns an explicit\nerror on the first call. The successful model retries and recovers; the failing model calls the tool only once and\nabandons it, leaving the downstream pipeline incomplete.\n\nCase C1\n\nC1_task_089 P2 — Explicit-Permanent\n\nHi, for user_123, please reserve 1 black\nSony XM5 for me using product_id\np_sony_xm5_blk. The title is Untitled and\nthe data is test. After you place the hold,\nplease prepare the checkout from that reservation and let me know exactly when the\nreservation ex...\n\n✓ Success gemini-3.1-pro-preview\nget_recommendations_\npopularity\n\nhold_inventory\n\nbuild_checkout_\nfrom_hold\n\n! P2\nconvert_datetime\n\nstop\nhold_inventory",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nimport requests, pathlib\\nurl='https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/evaluation/core/judge.py'\\nr=requests.get(url,headers={'User-Agent':'Mozilla/5.0'},timeout=20)\\nprint(r.status_code, len(r.text))\\npath='/mnt/efs/razvan-gabrieldumitru/toolmaze_judge.py'\\npathlib.Path(path).write_text(r.text)\\nprint(r.text[:4000])\\nPY\", 'description': 'Fetch ToolMaze judge implementation'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "200 58403\n\"\"\"Judge System for evaluating agent performance based on ground truth.\n\n重构版本：使用子集匹配评估算法。\n\n评估逻辑：\n- 检查 Agent 的执行轨迹是否覆盖了 Expected Result\n- 工具覆盖：Agent 必须调用 Expected Result 中出现的所有工具\n- 调用次数：Agent 的调用次数 >= Expected Result 中的次数\n- 执行顺序：不检查，Agent 可以按任意顺序执行\n\nImplements the decision logic matrix:\n- P0: Standard execution, must succeed\n- P1: Must succeed with retry\n- P2: Must fail gracefully at victim node\n- P3: Must succeed with data validation and retry\n- P4: Must fail gracefully after detecting data corruption\n\"\"\"\n\nimport json\nimport re\nfrom collections import Counter\nfrom pathlib import Path\nfrom typing import Dict, Any, Optional, List, Set\n\n\nclass JudgeSystem:\n    \"\"\"Judge system for evaluating agent execution traces using subset matching.\"\"\"\n\n    def __init__(\n        self,\n        llm_client: Optional[Any] = None,\n        model: str = \"deepseek-chat\",\n        temperature: float = 0.3,\n        template_dir: Optional[str] = None\n    ):\n        \"\"\"Initialize judge system.\n\n        Args:\n            llm_client: LLM client for semantic judgement (OpenAI client)\n            model: Model name for LLM-as-judge\n            temperature: Sampling temperature\n            template_dir: Base directory containing template folders\n        \"\"\"\n        self.llm_client = llm_client\n        self.model = model\n        self.temperature = temperature\n        self.template_dir = template_dir\n\n    def judge(self, task_json: Dict[str, Any], trace: Dict[str, Any]) -> Dict[str, Any]:\n        \"\"\"Judge whether the agent execution passed or failed.\n\n        Args:\n            task_json: Task specification with expected_result and execution_trace\n            trace: Execution trace from sandbox\n\n        Returns:\n            Judgement result with pass/fail and detailed reasoning\n        \"\"\"\n        mode = task_json.get(\"perturbation_mode\", \"P0\")\n        complexity = task_json.get(\"complexity\", \"C1\")\n\n        # 按复杂度分派到对应评测逻辑\n        if complexity == \"C2\":\n            return self._judge_c2(task_js",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Grep",
+   "input": "{'path': '/mnt/efs/razvan-gabrieldumitru/toolmaze_judge.py', 'pattern': 'def _check_p1_legacy|P1 failed|no retry|missing required tools|_extract_actual_trace', 'output_mode': 'content', 'context': 3, 'head_limit': 120}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "113-        expected_tools = [call[\"tool_name\"] for call in expected_tool_calls]\n114-\n115-        # 提取实际执行轨迹中的工具列表\n116:        actual_trace = self._extract_actual_trace(trace)\n117-\n118-        # 执行子集匹配检查\n119-        subset_result = self._evaluate_subset_matching(expected_tools, actual_trace)\n--\n208-        \"\"\"\n209-        # Extract traces\n210-        ground_truth_trace = self._extract_ground_truth_trace(task_json)\n211:        actual_trace = self._extract_actual_trace(trace)\n212-\n213-        required_tools = set(ground_truth_trace)\n214-        successful_tools = self._extract_successful_tools(trace)\n--\n226-        passed = all_tools_executed\n227-        failure_reasons = []\n228-        if missing_tools:\n229:            failure_reasons.append(f\"missing required tools: {missing_tools}\")\n230-\n231-        return {\n232-            \"pass\": passed,\n--\n235-\n236-        }\n237-\n238:    def _check_p1_legacy(\n239-        self,\n240-        task_json: Dict[str, Any],\n241-        trace: Dict[str, Any]\n--\n246-        \"\"\"\n247-        victim_tool = self._find_victim_tool(task_json)\n248-        ground_truth_trace = self._extract_ground_truth_trace(task_json)\n249:        actual_trace = self._extract_actual_trace(trace)\n250-        retry_info = self._check_retry(trace, victim_tool)\n251-\n252-        required_tools = set(ground_truth_trace)\n--\n265-        passed = trace_match and len(missing_tools) == 0\n266-        failure_reasons = []\n267-        if not retry_info[\"has_retry\"]:\n268:            failure_reasons.append(f\"no retry on '{victim_tool}' (called {retry_info['call_count']} time(s), need >=2)\")\n269-        if not retry_info[\"final_success\"]:\n270-            failure_reasons.append(f\"'{victim_tool}' never succeeded after retries\")\n271-        if missing_tools:\n272:            failure_reasons.append(f\"missing required tools: {missing_tools}\")\n273-\n274-        return {\n275-            \"pass\": passed,\n276:            \"failure_reason\": None if passed else f\"P1 failed: {'; '.join(failure_r",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/mnt/efs/razvan-gabrieldumitru/toolmaze_judge.py', 'offset': 238, 'limit': 50}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "238\t    def _check_p1_legacy(\n239\t        self,\n240\t        task_json: Dict[str, Any],\n241\t        trace: Dict[str, Any]\n242\t    ) -> Dict[str, Any]:\n243\t        \"\"\"Check P1 (Explicit-Transient): Must succeed with retry.\n244\t\n245\t        Legacy version for backward compatibility.\n246\t        \"\"\"\n247\t        victim_tool = self._find_victim_tool(task_json)\n248\t        ground_truth_trace = self._extract_ground_truth_trace(task_json)\n249\t        actual_trace = self._extract_actual_trace(trace)\n250\t        retry_info = self._check_retry(trace, victim_tool)\n251\t\n252\t        required_tools = set(ground_truth_trace)\n253\t        successful_tools = self._extract_successful_tools(trace)\n254\t        missing_tools = list(required_tools - successful_tools)\n255\t\n256\t        trace_match = retry_info[\"has_retry\"] and retry_info[\"final_success\"]\n257\t        trace_check = {\n258\t            \"match\": trace_match,\n259\t            \"victim_tool\": victim_tool,\n260\t            \"missing_tools\": missing_tools,\n261\t            \"ground_truth\": {\"execution_trace\": ground_truth_trace},\n262\t            \"actual\": {\"execution_trace\": actual_trace}\n263\t        }\n264\t\n265\t        passed = trace_match and len(missing_tools) == 0\n266\t        failure_reasons = []\n267\t        if not retry_info[\"has_retry\"]:\n268\t            failure_reasons.append(f\"no retry on '{victim_tool}' (called {retry_info['call_count']} time(s), need >=2)\")\n269\t        if not retry_info[\"final_success\"]:\n270\t            failure_reasons.append(f\"'{victim_tool}' never succeeded after retries\")\n271\t        if missing_tools:\n272\t            failure_reasons.append(f\"missing required tools: {missing_tools}\")\n273\t\n274\t        return {\n275\t            \"pass\": passed,\n276\t            \"failure_reason\": None if passed else f\"P1 failed: {'; '.join(failure_reasons)}\",\n277\t            \"trace_check\": trace_check,\n278\t\n279\t        }\n280\t\n281\t    def _check_p2_legacy(\n282\t        self,\n283\t        task_json: Dict[str, Any],\n284\t        trace: Dict[st",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Grep",
+   "input": "{'path': '/mnt/efs/razvan-gabrieldumitru/toolmaze_judge.py', 'pattern': 'def _extract_actual_trace|def _extract_successful_tools|def _check_retry|def _find_victim_tool', 'output_mode': 'content', 'context': 3, 'head_limit': 160}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "1058-\n1059-    # ========== Helper Methods ==========\n1060-\n1061:    def _extract_successful_tools(self, trace: Dict[str, Any]) -> set:\n1062-        \"\"\"Extract tools that were successfully executed (at least once without error).\n1063-\n1064-        Args:\n--\n1129-        execution_trace = task_json.get(\"execution_trace\", [])\n1130-        return [step[\"tool_name\"] for step in execution_trace]\n1131-\n1132:    def _find_victim_tool(self, task_json: Dict[str, Any]) -> str:\n1133-        \"\"\"Find the victim tool from execution trace.\n1134-\n1135-        Args:\n--\n1430-            \"reasoning\": f\"Forbidden (depend on victim): {forbidden_tools}; independent tools are allowed\"\n1431-        }\n1432-\n1433:    def _extract_actual_trace(self, trace: Dict[str, Any]) -> List[str]:\n1434-        \"\"\"Extract tool names from actual execution trace.\n1435-\n1436-        Args:\n--\n1473-                })\n1474-        return errors\n1475-\n1476:    def _check_retry(self, trace: Dict[str, Any], victim_tool: str) -> Dict[str, Any]:\n1477-        \"\"\"Check if tool was retried.\"\"\"\n1478-        call_count = 0\n1479-        final_success = False",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/mnt/efs/razvan-gabrieldumitru/toolmaze_judge.py', 'offset': 1061, 'limit': 100}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "1061\t    def _extract_successful_tools(self, trace: Dict[str, Any]) -> set:\n1062\t        \"\"\"Extract tools that were successfully executed (at least once without error).\n1063\t\n1064\t        Args:\n1065\t            trace: Execution trace\n1066\t\n1067\t        Returns:\n1068\t            Set of tool names that succeeded at least once\n1069\t        \"\"\"\n1070\t        successful_tools = set()\n1071\t        messages = self._get_messages(trace)\n1072\t\n1073\t        # Iterate through all tool calls and their results\n1074\t        for msg in messages:\n1075\t            if msg.get(\"role\") == \"assistant\" and msg.get(\"type\") == \"tool_call\":\n1076\t                call = msg.get(\"tool_call\", {})\n1077\t                tool_name = call.get(\"name\")\n1078\t                if not tool_name:\n1079\t                    continue\n1080\t\n1081\t                # Find the corresponding tool result\n1082\t                call_id = call.get(\"id\")\n1083\t                result_msg = self._find_tool_result(messages, call_id, tool_name)\n1084\t\n1085\t                if result_msg:\n1086\t                    output = result_msg.get(\"content\", {})\n1087\t                    # Check if this call succeeded (no error)\n1088\t                    has_error = isinstance(output, dict) and \"error\" in output\n1089\t                    if not has_error:\n1090\t                        successful_tools.add(tool_name)\n1091\t\n1092\t        return successful_tools\n1093\t\n1094\t    def _extract_successful_tool_counts(self, trace: Dict[str, Any]) -> Counter:\n1095\t        \"\"\"Extract successful tool call counts from actual execution trace.\"\"\"\n1096\t        successful_counts: Counter = Counter()\n1097\t        messages = self._get_messages(trace)\n1098\t\n1099\t        for msg in messages:\n1100\t            if msg.get(\"role\") != \"assistant\" or msg.get(\"type\") != \"tool_call\":\n1101\t                continue\n1102\t\n1103\t            call = msg.get(\"tool_call\", {})\n1104\t            tool_name = call.get(\"name\")\n1105\t            if not tool_name:\n1106\t                continue\n1",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/mnt/efs/razvan-gabrieldumitru/toolmaze_judge.py', 'offset': 1433, 'limit': 70}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "1433\t    def _extract_actual_trace(self, trace: Dict[str, Any]) -> List[str]:\n1434\t        \"\"\"Extract tool names from actual execution trace.\n1435\t\n1436\t        Args:\n1437\t            trace: Execution trace\n1438\t\n1439\t        Returns:\n1440\t            List of tool names in call order\n1441\t        \"\"\"\n1442\t        messages = self._get_messages(trace)\n1443\t        tool_names = []\n1444\t        for msg in messages:\n1445\t            if msg.get(\"role\") == \"assistant\" and msg.get(\"type\") == \"tool_call\":\n1446\t                tool_name = msg.get(\"tool_call\", {}).get(\"name\")\n1447\t                if tool_name:\n1448\t                    tool_names.append(tool_name)\n1449\t        return tool_names\n1450\t\n1451\t    def _has_standard_sequence(self, trace: Dict[str, Any], task_json: Dict[str, Any]) -> bool:\n1452\t        \"\"\"Check if trace follows standard sequence.\"\"\"\n1453\t        # Simplified: check if no errors occurred\n1454\t        return self._has_no_errors(trace)\n1455\t\n1456\t    def _has_no_errors(self, trace: Dict[str, Any]) -> bool:\n1457\t        \"\"\"Check if trace has no errors.\"\"\"\n1458\t        for tool_result in self._iter_tool_results(trace):\n1459\t            output = tool_result.get(\"content\", {})\n1460\t            if isinstance(output, dict) and \"error\" in output:\n1461\t                return False\n1462\t        return True\n1463\t\n1464\t    def _get_error_details(self, trace: Dict[str, Any]) -> List[Dict[str, Any]]:\n1465\t        \"\"\"Get details of all errors in trace.\"\"\"\n1466\t        errors = []\n1467\t        for tool_result in self._iter_tool_results(trace):\n1468\t            output = tool_result.get(\"content\", {})\n1469\t            if isinstance(output, dict) and \"error\" in output:\n1470\t                errors.append({\n1471\t                    \"tool\": tool_result.get(\"name\", \"unknown\"),\n1472\t                    \"error\": output.get(\"error\", \"unknown error\")\n1473\t                })\n1474\t        return errors\n1475\t\n1476\t    def _check_retry(self, trace: Dict[str, Any], victim_tool: str) -",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/mnt/efs/razvan-gabrieldumitru/toolmaze_judge.py', 'offset': 1476, 'limit': 40}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "1476\t    def _check_retry(self, trace: Dict[str, Any], victim_tool: str) -> Dict[str, Any]:\n1477\t        \"\"\"Check if tool was retried.\"\"\"\n1478\t        call_count = 0\n1479\t        final_success = False\n1480\t        call_details = []\n1481\t\n1482\t        messages = self._get_messages(trace)\n1483\t        for msg in messages:\n1484\t            if msg.get(\"role\") == \"assistant\" and msg.get(\"type\") == \"tool_call\":\n1485\t                call = msg.get(\"tool_call\", {})\n1486\t                if call.get(\"name\") != victim_tool:\n1487\t                    continue\n1488\t                call_count += 1\n1489\t                result_msg = self._find_tool_result(messages, call.get(\"id\"), victim_tool)\n1490\t                output = result_msg.get(\"content\", {}) if result_msg else {}\n1491\t                has_error = isinstance(output, dict) and \"error\" in output\n1492\t                if not has_error:\n1493\t                    final_success = True\n1494\t                call_details.append({\n1495\t                    \"call_index\": call_count,\n1496\t                    \"has_error\": has_error,\n1497\t                    \"error\": output.get(\"error\") if has_error else None\n1498\t                })\n1499\t\n1500\t        return {\n1501\t            \"has_retry\": call_count >= 2,\n1502\t            \"call_count\": call_count,\n1503\t            \"final_success\": final_success,\n1504\t            \"call_details\": call_details\n1505\t        }\n1506\t\n1507\t    # ========== Message Helpers ==========\n1508\t\n1509\t    def _get_messages(self, trace: Dict[str, Any]) -> List[Dict[str, Any]]:\n1510\t        \"\"\"Return normalized message list.\"\"\"\n1511\t        return trace.get(\"messages\", [])\n1512\t\n1513\t    def _iter_tool_results(self, trace: Dict[str, Any]) -> List[Dict[str, Any]]:\n1514\t        \"\"\"Yield tool result messages.\"\"\"\n1515\t        return [",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nimport requests, pathlib\\nfor file in ['evaluation/README.md','run_api_eval.py','evaluation/configs/eval_config.yaml','evaluation/configs/openai_eval_config_c1.yaml','evaluation/agents/base_agent.py','evaluation/core/sandbox.py']:\\n    url='https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/'+file\\n    r=requests.get(url,headers={'User-Agent':'Mozilla/5.0'},timeout=20)\\n    print('\\\\nFILE',file,r.status_code,len(r.text))\\n    print(r.text[:2500])\\nPY\", 'description': 'Fetch evaluation README and harness files'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "FILE evaluation/README.md 200 4771\n# TOOLMAZE Evaluation System\n\nComplete evaluation framework for testing LLM agents on C1/C2/C3/C4 tasks with P0-P4 perturbation modes.\n\n> The full project README lives at the ToolMaze project root\n> (`../README.md`). This file documents the `evaluation/` sub-package only.\n\n## Quick Start\n\n### 1. Install Dependencies\n\n```bash\n# Activate your conda environment\nconda activate toolmaze\n\n# Install dependencies (top-level)\npip install -r ../requirements.txt\n```\n\n### 2. Configure\n\nEdit `evaluation/configs/openai_eval_config_c1.yaml`:\n\n```yaml\nagent:\n  type: \"openai\"  # or \"anthropic\", \"vllm\"\n  model: \"gpt-4o\"\n  api_key: \"${OPENAI_API_KEY}\"\n\njudge:\n  model: \"gpt-5.5\"\n  api_key: \"${OPENAI_API_KEY}\"\n```\n\nSet environment variables:\n\n```bash\nexport OPENAI_API_KEY=\"your-key\"\n```\n\n### 3. Run Evaluation\n\n**specific task eval:**\n\n```bash\n# Run single task (for testing) - use new task ID format\npython evaluation/scripts/run_eval.py --task-id C1_task_001_P0\n\n# Run all P0 tasks\npython evaluation/scripts/run_eval.py --modes P0\n\n# Run C3 tasks\npython evaluation/scripts/run_eval.py --task-category c3 --modes P0 P1 P2 P3 P4\n\n# Run C4 tasks\npython evaluation/scripts/run_eval.py --task-category c4 --modes P0 P1 P2 P3 P4\n\n# Run full evaluation (all modes)\npython evaluation/scripts/run_eval.py --modes P0 P1 P2 P3 P4\n\n# Run with specific agent/model\npython evaluation/scripts/run_eval.py --agent-type openai --model gpt-4o --modes P0 P1\n```\n\n**batch eval for multiple models:**\n\nConfig your models and coworkers in run_batch_api_eval.py (all models use same url and api-key, config at `evaluation/configs/openai_eval_config_c1.yaml`).\n\n```python\nMODELS: dict[str, int] = {\n    \"gpt-5.5\": 4,\n    \"gemini-3.1-pro-preview\": 4,\n    \"deepseek-v4-pro\": 4,\n    \"kimi-k2.6\": 2,\n    \"glm-5.1\": 4,\n    \"qwen3.6-27b\": 4,\n    \"MiniMax-M2.7\": 4,\n    \"qwen3.5-35b-a3b\": 4,\n    \"qwen3.5-397b-a17b\": 4,\n    \"claude-sonnet-4-6\": 2,\n}\n```\n\nRun `run_batch_api_eval.py`.\n\n```bash\n# full eval",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nimport requests, pathlib\\nfor file in ['evaluation/agents/openai_agent.py','evaluation/agents/vllm_agent.py','evaluation/scripts/run_eval.py']:\\n    url='https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/'+file\\n    r=requests.get(url,headers={'User-Agent':'Mozilla/5.0'},timeout=20)\\n    print('\\\\nFILE',file,r.status_code,len(r.text))\\n    print(r.text[:5000])\\nPY\", 'description': 'Fetch agent and evaluation runner files'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "FILE evaluation/agents/openai_agent.py 200 16283\n\"\"\"OpenAI-based Agent implementation using Function Calling.\"\"\"\n\nimport json\nfrom typing import Dict, Any, Optional, List\nfrom openai import OpenAI\nimport time\n\nfrom .base_agent import BaseAgent, AgentAction, TokenUsage, ToolCall\n\n\nclass OpenAIAgent(BaseAgent):\n    \"\"\"Agent implementation using OpenAI Chat Completions API with Function Calling.\"\"\"\n\n    def __init__(\n        self,\n        model: str = \"gpt-4o\",\n        api_key: Optional[str] = None,\n        base_url: Optional[str] = None,\n        temperature: float = 0.7,\n        max_tokens: int = 4096\n    ):\n        \"\"\"Initialize OpenAI agent.\n\n        Args:\n            model: Model name (e.g., gpt-4o, gpt-3.5-turbo)\n            api_key: OpenAI API key\n            base_url: Optional base URL (for VLLM compatibility)\n            temperature: Sampling temperature\n            max_tokens: Max tokens per response\n        \"\"\"\n        self.model = model\n        self.temperature = temperature\n        self.max_tokens = max_tokens\n\n        # 初始化 OpenAI 客户端\n        self.client = OpenAI(api_key=api_key, base_url=base_url)\n\n        # 状态变量\n        self.messages: List[Dict[str, Any]] = []\n        self.tools: List[Dict[str, Any]] = []\n        self.input_tokens: int = 0\n        self.output_tokens: int = 0\n        self.task_description: str = \"\"\n\n        # 由 ExecutionEngine 在执行前设置，用于选择对应系统提示\n        # None 表示扰动模式，使用 fault-aware 提示\n        self.perturbation_mode: Optional[str] = None\n\n        # 强制使用 P0 系统提示（忽略扰动模式）\n        self.force_p0_prompt: bool = False\n\n    def initialize(self, task_description: str, tool_definitions: Dict[str, Any]) -> None:\n        \"\"\"Initialize with task and tools.\"\"\"\n        self.task_description = task_description\n        self.messages = []\n        self.input_tokens = 0\n        self.output_tokens = 0\n\n        # 将工具定义转换为 OpenAI Function Calling 格式\n        self.tools = self._convert_tool_definitions(tool_definitions)\n\n        # 构建并添加系统消息\n        system_message =",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Grep",
+   "input": "{'path': '/mnt/efs/razvan-gabrieldumitru/toolmaze.txt', 'pattern': 'Evaluation prompt for P1-P4|hint|system prompt|failures', 'output_mode': 'content', 'context': 4, 'head_limit': 80}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "15-\n16-Abstract\n17-Existing benchmarks evaluate Tool-Integrated\n18-Reasoning (TIR) in LLMs on idealized “happy\n19:paths”, largely overlooking real-world tool failures. We introduce T OOL M AZE, a benchmark\n20-for dynamic path discovery and error recovery in TIR agents. To separate systematic\n21-replanning from blind trial-and-error, T OOL M AZE adopts a two-dimensional design: DAGbased topological complexity and a 2 × 2\n22-taxonomy of tool perturbations (explicit/implicit, transient/permanent). Evaluations show\n23-that perturbations degrade performance across\n24-nearly all models, with the sharpest drops\n25:under implicit semantic failures. Driven by\n26-systemic over-trust in corrupted outputs, Perturbation Recovery Rate (PRR) plummets by\n27-around 37% in these scenarios, while complex\n28-topologies trap agents in futile trial-and-error\n29-loops. Crucially, agentic fault-tolerance improves with model scale 3.66× slower than\n--\n43-\"happy path\" fallacy, implicitly assuming perfectly\n44-stable and truthful environments. Real-world tool\n45-execution, by contrast, is rarely a seamless linear\n46-pipeline. Instead, it forms a complex, failure-prone\n47:dependency graph (He et al., 2025). Agents frequently encounter explicit failures such as network\n48-* Equal contribution.\n49-†\n50-\n51-Corresponding author.\n--\n87-\n88-Figure 1: An illustrative example of agent behavior\n89-under tool failure. The unstable agent aborts the task\n90-after an endless retry loop, whereas the robust agent\n91:wisely bypasses repeated failures by switching to an\n92-alternative tool.\n93-\n94-errors (e.g., 404, 429, timeout) that clearly block\n95:execution paths (Zhang et al., 2026). More insidiously, they face implicit failures (Winston and Just,\n96-2025; Vuddanti et al., 2026)—structurally valid but\n97-semantically corrupted responses, such as negative\n98-stock counts caused by delayed inventory updates.\n99-Without autonomous anomaly detection, agents\n--\n173-and dynamic missions, while STT-Arena(Hui et",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/mnt/efs/razvan-gabrieldumitru/toolmaze.txt', 'offset': 540, 'limit': 160}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "540\terror manifestation fundamentally bifurcates into\n541\texplicit and implicit failures. While explicit failures involve machine-readable exceptions (such as\n542\tHTTP 404) that obstruct program execution, implicit failures generate structurally compliant but\n543\tsemantically flawed outputs, making autonomous\n544\tverification indispensable. For recovery strategies,\n545\ttemporal persistence distinguishes transient failures resolvable via simple retries from permanent\n546\tones that force dynamic rerouting or graceful termination. These dimensions yield four distinct modes\n547\t(P1: Explicit-Transient, P2: Explicit-Permanent,\n548\tP3: Implicit-Transient, P4: Implicit-Permanent)\n549\t\n550\tto comprehensively assess resilient replanning (details in Appendix A).\n551\t3.3\n552\t\n553\tDAG-Based Task Generation Pipeline\n554\t\n555\tTo populate the C × P evaluation matrix defined\n556\tin Section 3.2, our pipeline employs a tool-first\n557\tparadigm, in which task graphs are constructed\n558\tbefore natural-language queries, that guarantees\n559\tboth semantic coherence and the mathematical\n560\tcompleteness of the ground-truth solution space.\n561\tAn LLM-based DAG Architect samples tools from\n562\tthe corpus (Section 3.1) to assemble a graph whose\n563\ttopology matches this target C level; solution-space\n564\tenumeration then establishes a provably complete\n565\tset of valid recovery paths before any naturallanguage query is generated. The process consists\n566\tof three sequential steps.\n567\tStep 1: DAG Assembly and Validation. For\n568\teach target complexity level, the DAG Architect\n569\tassembles a DAG whose nodes are tool calls and\n570\twhose edges encode data-flow dependencies. Structural graph validation enforces acyclicity and confirms that the graph topology matches the intended\n571\tC pattern. Semantic validation further filters out\n572\tincoherent data-flow compositions, such as cases\n573\tin which a weather-object field is passed to a stockprice lookup tool. To perform this check, a secondary LLM",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/mnt/efs/razvan-gabrieldumitru/toolmaze.txt', 'offset': 700, 'limit': 140}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "700\t†\n701\t\n702\tColumn sums exceed 100 as cross-domain chaining\n703\tis native to the benchmark.\n704\t\n705\tTable 1: Domain distribution, tool-set similarity, and\n706\ttopological path statistics across C1-C4.\n707\t\n708\tfaults affect only the initial invocation, whereas\n709\tP2/P4 faults make the targeted tool permanently\n710\tunavailable or corrupted.\n711\t3.5\n712\t\n713\tEvaluation Framework and Metrics\n714\t\n715\tTo rigorously quantify agent robustness and dynamic path discovery, we evaluate execution trajectories over three complementary dimensions: overall completion (TSR), recovery capability (PRR),\n716\tand replanning efficiency (RC). Let Tm denote\n717\tthe set of evaluation trajectories under perturbation mode m. For each trajectory τ ∈ Tm , let\n718\tIsucc (τ ) ∈ {0, 1} indicate successful task completion, and Ipert (τ ) ∈ {0, 1} indicate exposure to the\n719\tinjected perturbation.\n720\tTask Success Rate (TSR). TSR captures the absolute task completion capability across the evaluation set:\n721\tTSRm = Eτ ∼Tm [Isucc (τ )]\n722\t1 X\n723\t=\n724\tIsucc (τ )\n725\t|Tm |\n726\t\n727\t(1)\n728\t\n729\tτ ∈Tm\n730\t\n731\tTSR reflects foundational tool-use proficiency (under non-perturbed) and overall resilience. Success under perturbation requires different strategies:\n732\tretrying for transient faults (P1/P3), switching to\n733\talternative paths for permanent faults (C2–C4 under P2/P4), or executing a graceful termination\n734\twhen no alternatives exist (C1 under P2/P4).\n735\tPerturbation Recovery Rate (PRR). To disentangle active recovery from passive avoidance,\n736\t\n737\t\fTSR (%) ↑\n738\t\n739\tModel\n740\t\n741\tTSR (%) ↑\n742\tP2\n743\t\n744\tP3\n745\t\n746\tPRR (%) ↑\n747\t\n748\tP4\n749\t\n750\tP2\n751\t\n752\tP3\n753\t\n754\tP4\n755\t\n756\tMiniMax-M2.7 (w/o hint)\n757\tMiniMax-M2.7 (w/ hint)\n758\t\n759\t56.50\n760\t55.50\n761\t\n762\t36.50 22.75 9.50\n763\t44.25 25.25 9.25\n764\t\n765\t7.25 19.00 48.61 24.16 11.38 9.22 23.34 56.59 72.65 83.14 86.66 74.76 25.03\n766\t9.00 21.94 57.66 27.75 9.86 12.05 26.83 50.40 70.71 85.43 85.34 72.97 27.50↑\n767\t\n768\tQwe",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nfrom pathlib import Path\\ntext=Path('/mnt/efs/razvan-gabrieldumitru/toolmaze.txt').read_text(errors='ignore')\\nidx=text.find('Table 6: Evaluation prompt for P1-P4')\\nprint(idx)\\nprint(text[idx-6000:idx+1000])\\nPY\", 'description': 'Extract evaluation prompt around Table 6'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "56618\nre Generation Prompt\n\nTables 18-19 show the prompt for implicit perturbation (P3, P4) generation.\n\n\fP1_ERROR_RESPONSES = [\n{\"status\": 503, \"message\": \"Service Temporarily Unavailable\", \"error_type\":\n\"ServiceUnavailable\"},\n{\"status\": 504, \"message\": \"Gateway Timeout\", \"error_type\": \"Timeout\"},\n{\"status\": 429, \"message\": \"Too Many Requests\", \"error_type\": \"\nRateLimitExceeded\"},\n{\"status\": 500, \"message\": \"Internal Server Error\", \"error_type\": \"\nInternalServerError\"},\n{\"status\": 502, \"message\": \"Bad Gateway\", \"error_type\": \"BadGateway\"},\n{\"status\": 409, \"message\": \"Maximum Concurrent Connections Reached\", \"\nerror_type\": \"ConcurrentLimit\"},\n{\"status\": 409, \"message\": \"Resource Temporarily Locked\", \"error_type\": \"\nResourceLocked\"},\n{\"status\": 503, \"message\": \"Cache Unavailable\", \"error_type\": \"\nCacheUnavailable\"},\n{\"status\": 502, \"message\": \"Upstream Service Error\", \"error_type\": \"\nUpstreamError\"},\n]\nP2_ERROR_RESPONSES = [\n{\"status\": 404, \"message\": \"Tool Not Found\", \"error_type\": \"NotFound\"},\n{\"status\": 410, \"message\": \"Tool Permanently Removed\", \"error_type\": \"Gone\n\"},\n{\"status\": 501, \"message\": \"Not Implemented\", \"error_type\": \"NotImplemented\n\"},\n{\"status\": 403, \"message\": \"Access Forbidden\", \"error_type\": \"Forbidden\"},\n{\"status\": 451, \"message\": \"Unavailable For Legal Reasons\", \"error_type\": \"\nUnavailableForLegalReasons\"},\n{\"status\": 402, \"message\": \"Account Quota Exhausted\", \"error_type\": \"\nQuotaExhausted\"},\n{\"status\": 410, \"message\": \"API Version Deprecated\", \"error_type\": \"\nAPIDeprecated\"},\n{\"status\": 410, \"message\": \"Feature Discontinued\", \"error_type\": \"\nFeatureDiscontinued\"},\n{\"status\": 451, \"message\": \"Service Unavailable In Your Region\", \"\nerror_type\": \"GeoBlocked\"},\n{\"status\": 403, \"message\": \"Account Suspended\", \"error_type\": \"\nAccountSuspended\"},\n{\"status\": 402, \"message\": \"License Expired Or Invalid\", \"error_type\": \"\nLicenseInvalid\"},\n{\"status\": 410, \"message\": \"Data Source Retired\", \"error_type\": \"\nDataSourceRetired\"},\n]\nP3_P4_CORRUPTION_TYPES = [\n",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Grep",
+   "input": "{'path': '/mnt/efs/razvan-gabrieldumitru/toolmaze.txt', 'pattern': 'P1_ERROR_RESPONSES|FAULT HANDLING|Failure-aware prompt|standard prompt|w/o hint', 'output_mode': 'content', 'context': 8, 'head_limit': 120}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "748-P4\n749-\n750-P2\n751-\n752-P3\n753-\n754-P4\n755-\n756:MiniMax-M2.7 (w/o hint)\n757-MiniMax-M2.7 (w/ hint)\n758-\n759-56.50\n760-55.50\n761-\n762-36.50 22.75 9.50\n763-44.25 25.25 9.25\n764-\n765-7.25 19.00 48.61 24.16 11.38 9.22 23.34 56.59 72.65 83.14 86.66 74.76 25.03\n766-9.00 21.94 57.66 27.75 9.86 12.05 26.83 50.40 70.71 85.43 85.34 72.97 27.50↑\n767-\n768:Qwen3.5-35B-A3B (w/o hint)\n769-Qwen3.5-35B-A3B (w/ hint)\n770-\n771-41.50\n772-38.00\n773-\n774-40.50 16.50 6.25\n775-46.50 18.25 7.50\n776-\n777-4.50 16.94 75.09 22.88 10.87 9.06 29.48 32.66 60.49 65.61 67.96 56.68 31.55\n778-5.00 19.31 80.87 26.49 12.71 8.43 32.13 31.84 59.45 67.39 71.27 57.49 32.56↑\n779-\n780:Qwen3.6-27B (w/o hint)\n781-Qwen3.6-27B (w/ hint)\n782-\n783-42.25\n784-44.50\n785-\n786-42.50 15.50 4.75 4.75 16.88 77.78 21.38 7.85 7.97 28.75 36.97 66.74 70.43 72.84 61.74 29.65\n787-48.50 27.75 11.25 8.25 23.94 80.15 33.06 16.55 11.52 35.32 32.98 63.69 72.40 74.83 60.98 34.13↑\n788-\n789:Qwen3.5-397B-A17B (w/o hint)\n790-Qwen3.5-397B-A17B (w/ hint)\n791-\n792-42.00\n793-44.50\n794-\n795-42.25 18.75 3.25\n796-48.75 24.00 9.50\n797-\n798:GLM-5.1 (w/o hint)\n799-GLM-5.1 (w/ hint)\n800-\n801-75.75\n802-74.75\n803-\n804-60.00 32.50 8.00 8.50 27.25 67.19 35.33 9.04 10.15 30.43 37.86 66.47 88.65 89.11 70.52 32.28\n805-66.25 37.00 14.75 17.00 33.75 75.22 38.72 15.65 18.35 36.98 32.32 62.48 81.98 81.24 64.50 38.14↑\n806-\n807:Deepseek-V4-Pro (w/o hint)\n808-Deepseek-V4-Pro (w/ hint)\n809-\n810-69.75\n811-68.00\n812-\n813-68.00 34.75 12.00 9.75 31.12 84.70 37.74 12.41 12.00 36.71 29.98 63.55 85.19 87.55 66.57 36.33\n814-71.25 46.75 25.50 19.75 40.81 90.41 47.91 29.00 21.99 47.33 27.15 55.51 71.53 79.04 58.31 45.09↑\n815-\n816:Claude-Sonnet-4-6 (w/o hint)\n817-Claude-Sonnet-4-6 (w/ hint)\n818-\n819-77.00\n820-76.25\n821-\n822-49.00 27.00 5.75 6.00 21.94 59.68 27.68 5.08 7.08 24.88 48.95 71.56 90.88 91.75 75.79 27.35\n823-75.50 39.50 27.75 25.25 42.00 90.61 38.94 29.99 26.63 46.54 23.22 61.85 69.58 73.29 56.99 46.14↑\n824-\n825:GPT-5.5 (w/o hint)\n826-GPT-5.5 (w/ hint)\n827-\n828",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Grep",
+   "input": "{'path': '/mnt/efs/razvan-gabrieldumitru/toolmaze.txt', 'pattern': 'Task description generation|Failure-aware prompt|You are an autonomous AI assistant', 'output_mode': 'content', 'context': 12, 'head_limit': 120}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "1555-schedule_meeting calls within the same trace,\n1556-faithfully simulating the stateful behaviour of calendar APIs. This simulation-based design eliminates\n1557-external network dependencies, API-key management, and rate-limit variability, making benchmark\n1558-results fully reproducible without sacrificing the\n1559-structural fidelity needed to stress-test agent tooluse behaviour.\n1560-As introduced in Table 1, domain footprints\n1561-across the 400 base tasks are non-mutually exclusive. This occurs because complex tasks routinely\n1562-chain APIs from different sectors (e.g., retrieving\n1563-a flight schedule and subsequently recording the\n1564-expense). To rigorously verify task diversity, we\n1565-calculate the intra-category mean Jaccard similarity of constituent tool sets across all 4,950 possible\n1566-\n1567:You are an autonomous AI assistant that executes\n1568-tool-based workflows.\n1569-TASK COMPLETION\n1570-- The user query may describe multiple sub-tasks.\n1571-You must complete ALL of them — do NOT skip any\n1572-sub-tasks.\n1573-- Every fact, data retrieval, or state change must come\n1574-from a tool call. Never substitute a tool result with\n1575-internal knowledge, and never report a step as completed unless you actually called the corresponding\n1576-tool and received its result in this conversation.\n1577-FINAL ANSWER FORMAT\n1578-- Be CONCISE and DIRECT. No emojis, markdown\n1579-formatting (**, etc.), or bullet points.\n--\n1647-\"physics_violation\",\n1648-\"tool_leakage\",\n1649-\"irrelevant_response\",\n1650-\"statistical_inconsistency\",\n1651-\"internal_contradiction\",\n1652-\"missing_required_fields\",\n1653-\"logic_violation\",\n1654-\"temporal_contradiction\",\n1655-\"fact_contradiction\",\n1656-]\n1657-Table 3: Perturbation classes.\n1658-\n1659:\fFailure-aware prompt.\n1660-\n1661:Task description generation.\n1662-\n1663:You are an autonomous AI assistant that executes\n1664-tool-based workflows. Tools may occasionally fail or\n1665-return unexpected data.\n1666-TASK COMPLETION\n1667-- ",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/mnt/efs/razvan-gabrieldumitru/toolmaze.txt', 'offset': 1567, 'limit': 95}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "1567\tYou are an autonomous AI assistant that executes\n1568\ttool-based workflows.\n1569\tTASK COMPLETION\n1570\t- The user query may describe multiple sub-tasks.\n1571\tYou must complete ALL of them — do NOT skip any\n1572\tsub-tasks.\n1573\t- Every fact, data retrieval, or state change must come\n1574\tfrom a tool call. Never substitute a tool result with\n1575\tinternal knowledge, and never report a step as completed unless you actually called the corresponding\n1576\ttool and received its result in this conversation.\n1577\tFINAL ANSWER FORMAT\n1578\t- Be CONCISE and DIRECT. No emojis, markdown\n1579\tformatting (**, etc.), or bullet points.\n1580\t- State only essential facts and requested results (e.g.,\n1581\tconfirmation codes). Omit internal technical details.\n1582\t\n1583\tTable 5: Evaluation prompt for P0. It does not hint the\n1584\tpossibility of tool failures or the corresponding recovery\n1585\tstrategies.\n1586\t\n1587\tC.2\n1588\t\n1589\tTask Description Generation Prompt\n1590\t\n1591\tTable 7 shows the prompt for task description generation from existing templates.\n1592\tC.3\n1593\t\n1594\tTemplate Generation Prompts\n1595\t\n1596\tTables 8-17 show prompts for generating task templates for C1 (Table 8, 9), C2 (Table 10, 11, 12), C3\n1597\t(Table 13, 14, 15), C4 (Table 16, 17), respectively.\n1598\tC.4\n1599\t\n1600\tImplicit Failure Generation Prompt\n1601\t\n1602\tTables 18-19 show the prompt for implicit perturbation (P3, P4) generation.\n1603\t\n1604\t\fP1_ERROR_RESPONSES = [\n1605\t{\"status\": 503, \"message\": \"Service Temporarily Unavailable\", \"error_type\":\n1606\t\"ServiceUnavailable\"},\n1607\t{\"status\": 504, \"message\": \"Gateway Timeout\", \"error_type\": \"Timeout\"},\n1608\t{\"status\": 429, \"message\": \"Too Many Requests\", \"error_type\": \"\n1609\tRateLimitExceeded\"},\n1610\t{\"status\": 500, \"message\": \"Internal Server Error\", \"error_type\": \"\n1611\tInternalServerError\"},\n1612\t{\"status\": 502, \"message\": \"Bad Gateway\", \"error_type\": \"BadGateway\"},\n1613\t{\"status\": 409, \"message\": \"Maximum Concurrent Connections Reached\", \"\n1614\terror_type\"",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/mnt/efs/razvan-gabrieldumitru/toolmaze.txt', 'offset': 1663, 'limit': 60}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "1663\tYou are an autonomous AI assistant that executes\n1664\ttool-based workflows. Tools may occasionally fail or\n1665\treturn unexpected data.\n1666\tTASK COMPLETION\n1667\t- The user query may describe multiple sub-tasks.\n1668\tYou must complete ALL of them — do NOT skip any\n1669\tsub-tasks.\n1670\t- Every fact, data retrieval, or state change must come\n1671\tfrom a tool call. Never substitute a tool result with\n1672\tinternal knowledge, and never report a step as completed unless you actually called the corresponding\n1673\ttool and received its result in this conversation.\n1674\t- Sub-tasks may be accomplishable through different\n1675\ttool combinations.\n1676\tFAULT HANDLING\n1677\t- When evaluating tool outputs, consider whether the\n1678\treturned data is coherent and usable for the next step\n1679\t— fields should be present, values should be semantically reasonable, and types should match what the\n1680\tworkflow requires.\n1681\t- If you determine that a required step cannot be accomplished by any available tool or approach, stop\n1682\tthe workflow and clearly report which step failed and\n1683\twhy, rather than proceeding with incomplete results.\n1684\tFINAL ANSWER FORMAT\n1685\t- Be CONCISE and DIRECT. No emojis, markdown\n1686\tformatting (**, etc.), or bullet points.\n1687\t- If SUCCESSFUL: State only essential facts and\n1688\trequested results (e.g., confirmation codes). Omit\n1689\tinternal technical details.\n1690\t- If HALTED: State clearly that the task was aborted\n1691\tand the reason (e.g., \"Task aborted: the pricing tool\n1692\treturned corrupted data after retry and no other alternative approaches exist\"). Do not apologize excessively.\n1693\t\n1694\tYou are an expert data generation assistant.\n1695\tYou will be given a tool execution trace of a task\n1696\tin multiple messages (one step per message). Your\n1697\tjob is to write a natural, colloquial user request\n1698\t(‘task_description‘) that would reasonably lead to\n1699\tperforming these steps.\n1700\t**CRITICAL REQUIREMENTS - YOU MUST\n1701\tFOLLOW ",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nimport requests, pathlib, re\\nurl='https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/evaluation/agents/openai_agent.py'\\ntext=requests.get(url,headers={'User-Agent':'Mozilla/5.0'},timeout=20).text\\npath='/mnt/efs/razvan-gabrieldumitru/openai_agent.py'\\npathlib.Path(path).write_text(text)\\nfor pat in ['_build_system_message','Tools may occasionally','standard prompt','force_p0_prompt']:\\n    print('---',pat)\\n    m=re.search(pat,text)\\n    print(m.start() if m else None)\\nprint(text[text.find('def _build_system_message'):text.find('def _convert_tool_definitions')])\\nPY\", 'description': 'Extract OpenAI agent system prompt builder'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "--- _build_system_message\n1957\n--- Tools may occasionally\n12566\n--- standard prompt\nNone\n--- force_p0_prompt\n1484\ndef _build_system_message(self) -> str:\n        \"\"\"Select and build the system message based on perturbation mode.\"\"\"\n        if self.force_p0_prompt or self.perturbation_mode == \"P0\":\n            return self._build_p0_system_message()\n        return self._build_perturbation_system_message()\n\n    def _build_p0_system_message(self) -> str:\n        \"\"\"System prompt for P0 (no perturbation): focus on complete execution.\"\"\"\n        return \"\"\"You are an autonomous AI assistant that executes tool-based workflows.\n\nTASK COMPLETION\n- The user query may describe multiple sub-tasks. You must complete ALL of them — do NOT skip any sub-tasks.\n- Every fact, data retrieval, or state change must come from a tool call. Never substitute a tool result with internal knowledge, and never report a step as completed unless you actually called the corresponding tool and received its result in this conversation.\n\nFINAL ANSWER FORMAT\n- Be CONCISE and DIRECT. No emojis, markdown formatting (**, ✅, etc.), or bullet points.\n- State only essential facts and requested results (e.g., confirmation codes). Omit internal technical details.\"\"\"\n\n    def _build_perturbation_system_message(self) -> str:\n        \"\"\"System prompt for P1–P4 (perturbation modes): fault-aware execution.\"\"\"\n        return \"\"\"You are an autonomous AI assistant that executes tool-based workflows. Tools may occasionally fail or return unexpected data.\n\nTASK COMPLETION\n- The user query may describe multiple sub-tasks. You must complete ALL of them — do NOT skip any sub-tasks.\n- Every fact, data retrieval, or state change must come from a tool call. Never substitute a tool result with internal knowledge, and never report a step as completed unless you actually called the corresponding tool and received its result in this conversation.\n- Sub-tasks may be accomplishable through different tool combinations.\n\nFAULT HANDLIN",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Grep",
+   "input": "{'path': '/mnt/efs/razvan-gabrieldumitru/openai_agent.py', 'pattern': 'def step|tool_calls|final_answer|receive_tool_result|self.messages.append', 'output_mode': 'content', 'context': 4, 'head_limit': 240}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "60-        self.tools = self._convert_tool_definitions(tool_definitions)\n61-\n62-        # 构建并添加系统消息\n63-        system_message = self._build_system_message()\n64:        self.messages.append({\n65-            \"role\": \"system\",\n66-            \"content\": system_message\n67-        })\n68-\n69:    def step(self, user_message: Optional[str] = None) -> AgentAction:\n70-        \"\"\"Execute one reasoning step.\"\"\"\n71-        # 首轮传入 user_message（通常为任务描述）\n72-        if user_message:\n73:            self.messages.append({\n74-                \"role\": \"user\",\n75-                \"content\": user_message\n76-            })\n77-\n--\n92-                    response = self.client.chat.completions.create(\n93-                        model=self.model,\n94-                        messages=self.messages,\n95-                        tools=self.tools if self.tools else None,\n96:                        parallel_tool_calls=False,\n97-                        temperature=self.temperature,\n98-                        max_tokens=self.max_tokens,\n99-                        timeout=45.0,\n100-                    )\n--\n114-                            print(f\"⚠️ Network/Server error: {error_msg}. Retrying in {sleep_time}s (Attempt {attempt+1}/{max_retries})...\")\n115-                            time.sleep(sleep_time)\n116-                            continue\n117-                    return AgentAction(\n118:                        type=\"final_answer\",\n119-                        content=f\"Error during execution: {last_error}\"\n120-                    )\n121-\n122-                choice = response.choices[0]\n--\n126-                msg_dict = None\n127-\n128-                # 处理不同 SDK 版本的响应格式差异\n129-                if message is None:\n130:                    raw_tool_calls = getattr(choice, 'tool_calls', None)\n131-                    raw_content = getattr(choice, 'content', None)\n132-                    raw_reasoning = getattr(choice, 'reasoning_content', None)\n133-\n134:                    if raw_tool_calls:\n135-                   ",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nimport requests, re, pathlib\\nurl='https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/evaluation/core/sandbox.py'\\ntext=requests.get(url,headers={'User-Agent':'Mozilla/5.0'},timeout=20).text\\npath='/mnt/efs/razvan-gabrieldumitru/sandbox.py'\\npathlib.Path(path).write_text(text)\\nfor pat in ['perturb','P1','Internal Server Error','max_rounds','while']:\\n    print('---',pat)\\n    for m in re.finditer(pat,text):\\n        print(m.start())\\n        break\\nprint(text[text.find('class ExecutionEngine'):text.find('def _build_tool_definitions')])\\nPY\", 'description': 'Extract sandbox execution engine logic'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "--- perturb\n123\n--- P1\n18909\n--- Internal Server Error\n--- max_rounds\n14837\n--- while\n15531\nclass ExecutionEngine:\n    \"\"\"Execution engine that runs agents in controlled perturbation environment.\"\"\"\n\n    def __init__(\n        self,\n        task_json: Dict[str, Any],\n        agent: BaseAgent,\n        tools_dir: Optional[str] = None\n    ):\n        \"\"\"Initialize execution engine.\n\n        Args:\n            task_json: Complete task specification\n            agent: Agent instance to evaluate\n            tools_dir: Directory containing tool plugins\n        \"\"\"\n        self.task_json = task_json\n        self.agent = agent\n\n        # 初始化 ToolLoader 与 ToolExecutor\n        if tools_dir is None:\n            tools_dir = str(Path(__file__).resolve().parent.parent.parent / \"tools\")\n\n        plugins_dir = str(Path(tools_dir) / \"plugins\")\n        definitions_dir = str(Path(tools_dir) / \"definitions\")\n\n        self.tool_loader = ToolLoader(definitions_dir)\n        self.tool_executor = ToolExecutor(\n            plugins_dir=plugins_dir,\n            definitions_dir=definitions_dir,\n            loader=self.tool_loader\n        )\n\n        # 提取任务基本信息\n        self.task_id = task_json[\"task_id\"]\n        # 优先使用 user_input[\"query\"] 作为实际用户查询\n        user_input = task_json.get(\"user_input\", {})\n        self.task_description = user_input.get(\"query\", task_json.get(\"task_description\", \"\"))\n        self.mode = task_json.get(\"perturbation_mode\", \"P0\")\n        self.perturbation_point = task_json.get(\"perturbation_point\", 0)\n        self.complexity = task_json.get(\"complexity\", \"C1\")\n\n        # 多路径 first-touch 激活状态\n        if self.complexity in (\"C2\", \"C3\", \"C4\"):\n            self.alternative_tools = self._get_c2_alt_tools(task_json)\n        else:\n            self.alternative_tools = set(task_json.get(\"alternative_tools\", []))\n        self._c2_activated = False  # 是否已触发 first-touch\n        self._c2_activated_tool = None  # 首次触发的 alt 工具\n\n        # 获取执行轨迹以提取工具定义与扰动信息\n        if self.complexity in (\"C2\",",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Grep",
+   "input": "{'path': '/mnt/efs/razvan-gabrieldumitru/sandbox.py', 'pattern': 'def run|execute|for round|while|receive_tool_result|final_answer|tool_call', 'output_mode': 'content', 'context': 4, 'head_limit': 220}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "414-        perturb_data = self._c4_all_perturbed_data.get(tool_name)\n415-        if perturb_data:\n416-            self.perturbation_map[tool_name] = perturb_data\n417-\n418:    def run(self, max_rounds: int = 15) -> Tuple[\"TraceLogger\", Dict[str, int]]:\n419-        \"\"\"Run the agent execution with perturbation interception.\n420-\n421-        Args:\n422-            max_rounds: Maximum number of reasoning rounds\n--\n434-        round_num = 0\n435-        # 记录初始用户消息\n436-        self.logger.log_user_message(self.task_description)\n437-\n438:        while round_num < max_rounds:\n439-            round_num += 1\n440-\n441-            # Agent 执行一步推理\n442-            action = self.agent.step(user_message=current_message if round_num == 1 else None)\n--\n450-                \"thought\": action.thought\n451-            }\n452-\n453-            # 若返回最终答案则记录并结束\n454:            if action.type == \"final_answer\":\n455-                self.logger.log_round(\n456-                    round_num=round_num,\n457-                    agent_action=action_dict,\n458-                    tool_result=None,\n459-                    perturbation_status=\"n/a\"\n460-                )\n461-                break\n462-\n463:            # 若返回 tool_call 则拦截并可能注入扰动\n464:            if action.type == \"tool_call\":\n465:                # 处理并行 tool_calls\n466:                if action.tool_calls and len(action.tool_calls) > 1:\n467:                    for idx, tc in enumerate(action.tool_calls):\n468:                        tool_result, perturbation_status = self._intercept_tool_call(\n469-                            tc.tool_name,\n470-                            tc.arguments\n471-                        )\n472-\n--\n484-                            tool_result=tool_result,\n485-                            perturbation_status=perturbation_status\n486-                        )\n487-\n488:                        self.agent.receive_tool_result(tc.tool_name, tool_result, tool_call_index=idx)\n489-                else:\n490-                    # 单工具调用\n491:  ",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/mnt/efs/razvan-gabrieldumitru/sandbox.py', 'offset': 418, 'limit': 175}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "418\t    def run(self, max_rounds: int = 15) -> Tuple[\"TraceLogger\", Dict[str, int]]:\n419\t        \"\"\"Run the agent execution with perturbation interception.\n420\t\n421\t        Args:\n422\t            max_rounds: Maximum number of reasoning rounds\n423\t\n424\t        Returns:\n425\t            Tuple of (TraceLogger, token_usage dict)\n426\t        \"\"\"\n427\t        # 初始化 Agent：设置扰动模式属性并传入任务描述与工具定义\n428\t        if hasattr(self.agent, \"perturbation_mode\"):\n429\t            self.agent.perturbation_mode = self.mode\n430\t        self.agent.initialize(self.task_description, self.tool_definitions)\n431\t\n432\t        # 首轮使用任务描述作为用户输入\n433\t        current_message = self.task_description\n434\t        round_num = 0\n435\t        # 记录初始用户消息\n436\t        self.logger.log_user_message(self.task_description)\n437\t\n438\t        while round_num < max_rounds:\n439\t            round_num += 1\n440\t\n441\t            # Agent 执行一步推理\n442\t            action = self.agent.step(user_message=current_message if round_num == 1 else None)\n443\t\n444\t            # 将 AgentAction 转为字典以便日志记录\n445\t            action_dict = {\n446\t                \"type\": action.type,\n447\t                \"tool_name\": action.tool_name,\n448\t                \"arguments\": action.arguments,\n449\t                \"content\": action.content,\n450\t                \"thought\": action.thought\n451\t            }\n452\t\n453\t            # 若返回最终答案则记录并结束\n454\t            if action.type == \"final_answer\":\n455\t                self.logger.log_round(\n456\t                    round_num=round_num,\n457\t                    agent_action=action_dict,\n458\t                    tool_result=None,\n459\t                    perturbation_status=\"n/a\"\n460\t                )\n461\t                break\n462\t\n463\t            # 若返回 tool_call 则拦截并可能注入扰动\n464\t            if action.type == \"tool_call\":\n465\t                # 处理并行 tool_calls\n466\t                if action.tool_calls and len(action.tool_calls) > 1:\n467\t                    for idx, tc in enumerate(action.tool_calls):\n468\t                        tool_r",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nimport requests, pathlib, re\\nfor file in ['evaluation/utils/trace_logger.py','evaluation/utils/result_saver.py']:\\n    url='https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/'+file\\n    text=requests.get(url,headers={'User-Agent':'Mozilla/5.0'},timeout=20).text\\n    pathlib.Path('/mnt/efs/razvan-gabrieldumitru/'+file.replace('/','_')).write_text(text)\\n    print('\\\\nFILE',file)\\n    print(text[:5000])\\nPY\", 'description': 'Fetch trace logging code'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "FILE evaluation/utils/trace_logger.py\n\"\"\"Trace Logger for recording agent execution.\"\"\"\n\nimport json\nfrom pathlib import Path\nfrom typing import Dict, Any, List, Optional\n\n\nclass TraceLogger:\n    \"\"\"Records the complete execution trace of an agent.\"\"\"\n\n    def __init__(self, task_id: str, mode: str):\n        \"\"\"Initialize trace logger.\n\n        Args:\n            task_id: Task identifier\n            mode: Perturbation mode (P0-P4)\n        \"\"\"\n        self.task_id = task_id\n        self.mode = mode\n        self.messages: List[Dict[str, Any]] = []\n        self._call_index = 0\n\n    def log_user_message(self, content: str) -> None:\n        \"\"\"Log the initial user message.\"\"\"\n        self.messages.append({\n            \"role\": \"user\",\n            \"content\": content\n        })\n\n    def log_round(\n        self,\n        round_num: int,\n        agent_action: Dict[str, Any],\n        tool_result: Optional[Dict[str, Any]] = None,\n        perturbation_status: str = \"clean\"\n    ) -> None:\n        \"\"\"Log one round of interaction in role/content message format.\"\"\"\n        action_type = agent_action.get(\"type\")\n        thought = agent_action.get(\"thought\") or \"\"\n        content = agent_action.get(\"content\") or thought\n\n        # Build assistant message\n        assistant_msg: Dict[str, Any] = {\n            \"role\": \"assistant\",\n            \"type\": action_type,\n            \"content\": content\n        }\n\n        # Track tool call metadata\n        call_id = None\n        if action_type == \"tool_call\":\n            self._call_index += 1\n            call_id = f\"call-{self._call_index}\"\n            assistant_msg[\"tool_call\"] = {\n                \"id\": call_id,\n                \"name\": agent_action.get(\"tool_name\"),\n                \"arguments\": agent_action.get(\"arguments\", {})\n            }\n            if thought:\n                assistant_msg.setdefault(\"metadata\", {})[\"thought\"] = thought\n        elif thought:\n            assistant_msg.setdefault(\"metadata\", {})[\"thought\"] = thought\n\n        sel",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nimport requests, json\\nbase='https://api.github.com/repos/Zhudongsheng75/ToolMaze/contents/tools/definitions'\\nr=requests.get(base,headers={'User-Agent':'Mozilla/5.0'},timeout=20)\\nprint(r.status_code)\\nfor item in r.json():\\n    if item['name'] in ['hold_inventory.json','build_checkout_from_hold.json','convert_datetime.json','get_recommendations_popularity.json','create_document_and_alert_from_data.json']:\\n        print(item['path'], item['download_url'])\\nPY\", 'description': 'List relevant tool definition files'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "200",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nimport requests\\nrepo='Zhudongsheng75/ToolMaze'\\nr=requests.get(f'https://api.github.com/repos/{repo}/git/trees/main?recursive=1',headers={'User-Agent':'Mozilla/5.0'},timeout=30)\\nfor item in r.json()['tree']:\\n    p=item['path']\\n    if any(name in p for name in ['hold_inventory','build_checkout_from_hold','convert_datetime','get_recommendations_popularity','create_document_and_alert_from_data']):\\n        print(item['type'], p)\\nPY\", 'description': 'Search repository for relevant tool files'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "blob tools/plugins/build_checkout_from_hold.py\nblob tools/plugins/convert_datetime.py\nblob tools/plugins/create_document_and_alert_from_data.py\nblob tools/plugins/get_recommendations_popularity.py\nblob tools/plugins/hold_inventory.py",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nimport requests, pathlib\\nfor file in ['tools/plugins/hold_inventory.py','tools/plugins/build_checkout_from_hold.py','tools/plugins/convert_datetime.py','tools/plugins/get_recommendations_popularity.py','tools/plugins/create_document_and_alert_from_data.py']:\\n    url='https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/'+file\\n    text=requests.get(url,headers={'User-Agent':'Mozilla/5.0'},timeout=20).text\\n    print('\\\\nFILE',file)\\n    print(text[:3000])\\nPY\", 'description': 'Fetch relevant ToolMaze tool implementations'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "FILE tools/plugins/hold_inventory.py\n\"\"\"\nhold_inventory Tool Plugin\n\nFunction: Reserve inventory for a product without payment\nCategory: Source\nDomain: Shopping\n\"\"\"\n\n# Hard-coded product data (matches example structure)\nPRODUCTS = {\n    \"p_sony_xm5_blk\": {\n        \"name\": \"Sony WH-1000XM5 Headphones (Black)\",\n        \"price\": 399.00,\n        \"category\": \"electronics\",\n        \"tags\": [\"audio\", \"sony\", \"headphone\"],\n        \"stock\": 10\n    },\n    \"p_sony_xm5_slv\": {\n        \"name\": \"Sony WH-1000XM5 Headphones (Silver)\",\n        \"price\": 399.00,\n        \"category\": \"electronics\",\n        \"tags\": [\"audio\", \"sony\", \"headphone\"],\n        \"stock\": 10\n    },\n    \"p_apple_airpods\": {\n        \"name\": \"Apple AirPods Pro 2\",\n        \"price\": 249.00,\n        \"category\": \"electronics\",\n        \"tags\": [\"audio\", \"apple\", \"earbuds\"],\n        \"stock\": 50\n    },\n    \"p_coke_500\": {\n        \"name\": \"Coca-Cola 500ml\",\n        \"price\": 1.50,\n        \"category\": \"beverage\",\n        \"tags\": [\"drink\", \"cola\", \"bottle\"],\n        \"stock\": 100\n    }\n}\n\n# Reservation storage (in-memory state)\nRESERVATIONS = {}  # reservation_id -> {user_id, product_id, quantity, expiry, total_price}\nCONSTRAINTS = {\n    \"product_id\": list(PRODUCTS.keys())\n}\n\nTOOL_NAME = \"hold_inventory\"\n\n\ndef execute(arguments, context) -> dict:\n    # Get user_id (optional parameter)\n    user_id = arguments.get(\"user_id\")\n\n    # Get product_id (required parameter)\n    product_id = arguments.get(\"product_id\")\n\n    if not product_id:\n        return {\"error\": \"product_id is required\"}\n\n    # Get quantity (optional parameter with reasonable default)\n    quantity = arguments.get(\"quantity\") or 1\n\n    # 1. Input validation\n    \n    try:\n        quantity = int(quantity)\n        if quantity < 1:\n            return {\"error\": \"Quantity must be at least 1\"}\n    except (TypeError, ValueError):\n        return {\"error\": \"Invalid quantity value\"}\n    \n    # 2. Get current timestamp (simulate time)\n    current_time = 1710000000\n    \n    # 4. ",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nimport requests\\ntext=requests.get('https://raw.githubusercontent.com/Zhudongsheng75/ToolMaze/main/tools/plugins/hold_inventory.py',headers={'User-Agent':'Mozilla/5.0'},timeout=20).text\\nprint(text[2000:5000])\\nPY\", 'description': 'Read remaining hold_inventory implementation'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "oduct = PRODUCTS.get(product_id)\n    if not product:\n        return {\"error\": f\"Product ID '{product_id}' not found\"}\n    \n    if product[\"stock\"] < quantity:\n        # Find similar products as fallback suggestions\n        similar_products = []\n        target_category = product[\"category\"]\n        for pid, pdata in PRODUCTS.items():\n            if pid != product_id and pdata[\"category\"] == target_category and pdata[\"stock\"] > 0:\n                similar_products.append({\n                    \"id\": pid,\n                    \"name\": pdata[\"name\"],\n                    \"price\": pdata[\"price\"],\n                    \"stock\": pdata[\"stock\"]\n                })\n                if len(similar_products) >= 3:  # Limit to 3 suggestions\n                    break\n        \n        return {\n            \"error\": f\"Insufficient stock for '{product_id}'. Available: {product['stock']}\",\n            \"suggestions\": similar_products\n        }\n    \n    reservation_id = \"RESV-14729548\"\n    expiry = current_time + 300  # 5 minutes expiry\n\n    # Calculate total price\n    total_price = product[\"price\"] * quantity\n    \n    # Update inventory and store reservation\n    # product[\"stock\"] -= quantity\n    # RESERVATIONS[reservation_id] = {\n    #     \"user_id\": user_id,\n    #     \"product_id\": product_id,\n    #     \"quantity\": quantity,\n    #     \"expiry\": expiry,\n    #     \"total_price\": total_price,\n    #     \"created_at\": current_time\n    # }\n    \n    return {\n        \"reservation_id\": reservation_id,\n        \"expires_in\": 300,\n        \"product_id\": product_id,\n        \"quantity\": quantity,\n        \"total_price\": total_price,\n        \"expiry_time\": expiry,\n        \"reservation_details\": {\n            \"product_id\": product_id,\n            \"quantity\": quantity,\n            \"total_price\": total_price\n        }\n    }",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nimport requests, json\\nurl='https://huggingface.co/datasets/dongsheng/ToolMaze/resolve/main/perturbed_tasks/c1/C1_task_089_P1.json'\\ndata=requests.get(url,headers={'User-Agent':'Mozilla/5.0'},timeout=20).json()\\nprint(data.keys())\\nfor k,v in data.items():\\n    if k not in ['execution_trace','expected_result']:\\n        print(k, type(v).__name__, (v if isinstance(v,(str,int,list,dict)) else type(v)))\\nprint('has tool_definitions?', 'tool_definitions' in data)\\nPY\", 'description': 'Inspect keys in perturbed task JSON'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "dict_keys(['task_id', 'template_id', 'complexity', 'task_description', 'user_input', 'execution_trace', 'expected_result', 'domains', 'perturbation_mode', 'perturbation_point'])\ntask_id str C1_task_089\ntemplate_id str C1_template_089\ncomplexity str C1\ntask_description str Please reserve 1 black Sony XM5 for me, then prepare the checkout from that hold and tell me when the reservation expires. After that, suggest some popular alternatives in the same category, and send me an in-app notification with the details.\nuser_input dict {'query': 'Hi, for user_123, please reserve 1 black Sony XM5 for me using product_id p_sony_xm5_blk. The title is Untitled and the data is test. After you place the hold, please prepare the checkout from that reservation and let me know exactly when the reservation expires. Then suggest some popular alternatives in the same category, and send me an in-app notification with all the details.', 'data': 'test', 'product_id': 'p_sony_xm5_blk', 'quantity': 1, 'title': 'Untitled', 'user_id': 'user_123'}\ndomains list ['Shopping', 'General']\nperturbation_mode str P1\nperturbation_point int 2\nhas tool_definitions? False",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "text",
+   "text": "I read the ToolMaze paper (arXiv 2606.05806), Appendix E/Figure 7 in the extracted PDF text, the Hugging Face task file `perturbed_tasks/c1/C1_task_089_P1.json`, and the ToolMaze harness/judge code in the GitHub repo.\n\n## Chronological account of the MiniMax-M2.7 failure\n\n### 1. Benchmark setting\n\nThe case is ToolMaze Appendix E, Figure 7: **C1_task_089 P1 — Explicit-Transient**.\n\nToolMaze defines this as a **C1** task, meaning a single linear tool pipeline with no alternative branches. The task’s perturbation mode is **P1**, described in the paper as **explicit-transient**: the target tool returns an explicit error on its first affected call, and the intended recovery behavior is to retry the tool.\n\nFor this case, the victim tool was:\n\n```text\nconvert_datetime\n```\n\nThe perturbed response shown in Figure 7 and in the task JSON was:\n\n```json\n{\"error\": \"Internal Server Error\"}\n```\n\nThe task JSON records this first `convert_datetime` call as:\n\n```json\n\"status\": \"error\",\n\"error_message\": \"500 InternalServerError\",\n\"is_perturbed\": true\n```\n\n### 2. User task given to the agent\n\nThe user query given to the agent was:\n\n> Hi, for user_123, please reserve 1 black Sony XM5 for me using product_id p_sony_xm5_blk. The title is Untitled and the data is test. After you place the hold, please prepare the checkout from that reservation and let me know exactly when the reservation expires. Then suggest some popular alternatives in the same category, and send me an in-app notification with all the details.\n\nThe task required the agent to perform a sequence of actions:\n\n1. Reserve one black Sony XM5 product.\n2. Prepare a checkout from the reservation.\n3. Convert the reservation expiry timestamp into a readable time.\n4. Retrieve popular alternative recommendations.\n5. Send an in-app notification/document with the details.\n\n### 3. Intended tool pipeline\n\nThe C1 template for this task defines a five-node linear DAG:\n\n```text\nhold_inventory\n→ build_checkout_from_hold\n→ convert_datetime\n→ get_recommendations_popularity\n→ create_document_and_alert_from_data\n```\n\nThe relevant bindings in the template show that:\n\n- `hold_inventory` uses the user’s `product_id`, `user_id`, and `quantity`.\n- `build_checkout_from_hold` uses the hold result from `hold_inventory`.\n- `convert_datetime` uses the `expiry_time` produced by `hold_inventory`.\n- `get_recommendations_popularity` uses the held product ID and user ID.\n- `create_document_and_alert_from_data` uses the user’s `title`, `data`, `user_id`, and fixed notification settings.\n\n### 4. Expected clean/interrupted execution for P1\n\nThe task file’s expected P1 execution trace shows the following intended sequence.\n\n#### Step 1: `hold_inventory`\n\nArguments:\n\n```json\n{\n  \"product_id\": \"p_sony_xm5_blk\",\n  \"user_id\": \"user_123\",\n  \"quantity\": 1\n}\n```\n\nOutput included:\n\n```json\n{\n  \"reservation_id\": \"RESV-14729548\",\n  \"expires_in\": 300,\n  \"product_id\": \"p_sony_xm5_blk\",\n  \"quantity\": 1,\n  \"total_price\": 399.0,\n  \"expiry_time\": 1710000300\n}\n```\n\n#### Step 2: `build_checkout_from_hold`\n\nArguments used the hold data from step 1 and quantity `1`.\n\nOutput:\n\n```json\n{\n  \"reservation_id\": \"RESV-14729548\",\n  \"product_id\": \"p_sony_xm5_blk\",\n  \"quantity\": 1\n}\n```\n\n#### Step 3: first `convert_datetime` call\n\nArguments:\n\n```json\n{\n  \"timestamp\": 1710000300\n}\n```\n\nBecause this is the P1 perturbation point, the harness returned the injected explicit error:\n\n```json\n{\n  \"error\": \"Internal Server Error\"\n}\n```\n\nThis was the key feedback signal: the tool failed explicitly on its first call.\n\n#### Step 4: expected retry of `convert_datetime`\n\nThe expected recovery trace calls `convert_datetime` again with the same timestamp:\n\n```json\n{\n  \"timestamp\": 1710000300\n}\n```\n\nOn retry, because P1 is transient, the task JSON records the clean successful result:\n\n```json\n{\n  \"original_timestamp\": 1710000300,\n  \"formatted_time\": \"2024-03-09 16:05\"\n}\n```\n\n#### Step 5: `get_recommendations_popularity`\n\nExpected output included two similar products:\n\n- S"
+  },
+  {
+   "turn": "judge",
+   "type": "text",
+   "text": "{\"evidence\":\"MiniMax-M2.7 executed the initial pipeline through hold_inventory and build_checkout_from_hold, then called the victim tool convert_datetime with the reservation expiry timestamp. The harness returned an explicit P1 transient error, {\\\"error\\\":\\\"Internal Server Error\\\"}, but the agent did not call convert_datetime again; it proceeded to get_recommendations_popularity and create_document_and_alert_from_data. The judge failed the run because convert_datetime was called only once, never succeeded after retry, and therefore no successful convert_datetime execution was present.\",\"reasoning\":\"The first root-cause failure was the model's handling of the tool observation: after receiving an explicit error from convert_datetime, it failed to use that feedback to retry the required transiently failing tool and instead continued the downstream workflow. This is best localized to model — tool because the error signal came from a tool response and the model's next action was the faulty step. Within that category, Tool Feedback Neglect is more precise than Tool Recovery Failure: the trace does not show a futile retry loop or trusting corrupted data; it shows the model overlooking an explicit tool-error signal and pushing forward. It is not owner — model Instruction-Following Failure or Instruction-Grader Mismatch because the task and failure-aware harness expected complete tool-based execution, and the required retry was discoverable from the explicit tool failure and P1 setting.\",\"category\":\"model — tool\",\"subtype\":\"Tool Feedback Neglect\"}"
+  },
+  {
+   "turn": "reflect",
+   "type": "text",
+   "text": "{\"evidence\":\"MiniMax-M2.7 followed the linear task through hold_inventory and build_checkout_from_hold, then called convert_datetime and received the explicit P1 transient error {\\\"error\\\":\\\"Internal Server Error\\\"}. It did not retry convert_datetime, and instead continued to get_recommendations_popularity and create_document_and_alert_from_data. The judge failed the run because convert_datetime was called only once, never succeeded after retry, and therefore had no successful execution in the trace.\",\"reasoning\":\"I checked the main disambiguations: this is not Instruction-Grader Mismatch because the failure-aware setup and the explicit tool error made recovery discoverable to a capable agent; it is not a generic owner — model Instruction-Following or Reasoning failure because the first wrong step is specifically the response to a tool result. It is not env Service Failure because the injected P1 failure was transient and recoverable by retry, not a non-recoverable external outage; it is not context, memory, or subagent-related because there was no compaction, durable memory issue, or delegation. Within model — tool, Tool Feedback Neglect remains the best subtype over Tool Recovery Failure because the observable first failure is not a retry loop or trusting corrupted valid data; it is ignoring an explicit error signal and pushing forward without the required retry.\",\"category\":\"model — tool\",\"subtype\":\"Tool Feedback Neglect\",\"changed\":false,\"confidence\":\"high\"}"
+  }
+ ],
+ "leaks": []
+}

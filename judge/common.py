@@ -58,6 +58,18 @@ ALIASES = {
         "claude-opus-4-8",
         {"thinking": {"type": "adaptive"}, "output_config": {"effort": "max"}},
     ),
+    "gpt-6-astra-max": (
+        "gpt-6-astra",
+        {"allowed_openai_params": ["reasoning"], "reasoning": {"effort": "max"}},
+    ),
+    "grok-4.6-max": (
+        "xai/grok-4.6",
+        {"reasoning_effort": "max"},
+    ),
+    "gemini-3.1-pro-max": (
+        "gemini/gemini-3.1-pro-preview",
+        {"reasoning_effort": "max"},
+    ),
     "glm-5.2": (
         "fireworks_ai/glm-5p2",
         {},
