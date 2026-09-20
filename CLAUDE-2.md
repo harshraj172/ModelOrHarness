@@ -119,6 +119,10 @@ Report, from the resulting matrix:
 If within-family κ is not markedly higher than across-family κ, say so plainly: that is
 the answer to the shared-priors objection.
 
+`figures/` is gitignored, so the regenerated PDF will not be committed by `git add -A`.
+Put the full κ matrix in the results file as a markdown table (that is the version people
+read), and additionally commit the figure with `git add -f figures/judge-kappa-heatmap.pdf`.
+
 ## Task 5: rescore everything
 
 Offline from `predictions/`. Run the sanity check first; it must reproduce the paper
@@ -220,14 +224,20 @@ It must stand alone and contain:
 ## Task 7: publish
 
 ```
-git add -A && git commit -m "round 2: complete runs, audits, per-class results"
+git add -A && git add -f figures/judge-kappa-heatmap.pdf
+git commit -m "round 2: complete runs, audits, per-class results"
 git push
 gh pr create --base main --head revision-judges \
   --title "Revision judge runs: 4 new families, consistency, per-class results" \
   --body-file results/revision_results.md
 ```
 
-A pushed branch notifies nobody, so open the PR. If `gh` isn't authenticated, say so and
+Everything the user needs must be in the repo, not sent separately: the new and re-run
+dossiers under `predictions/`, `results/revision_results.md`, `results/per-class/`, the
+copied `manifest.json`/`run.log` per run, and the κ heatmap. Verify with
+`git status --short` that nothing is left untracked, and with
+`git ls-tree -r --name-only origin/revision-judges | grep -cE '^(predictions|results)/'`
+that it reached the remote. A pushed branch notifies nobody, so open the PR. If `gh` isn't authenticated, say so and
 give the user the branch name instead. Then tell the user it is ready for review, listing
 anything still unresolved.
 
