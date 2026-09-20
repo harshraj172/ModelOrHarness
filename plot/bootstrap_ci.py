@@ -34,8 +34,17 @@ PAPER_RUNS = [
 ]
 
 
-def load(run_dir: str) -> dict[str, dict]:
-    """{example id (from filename, which is authoritative): {gold, pred}}"""
+def gold_rows() -> dict[str, dict]:
+    """Gold labels for every test id, from data/examples.jsonl + data/splits.json."""
+    ex = {json.loads(l)["id"]: json.loads(l) for l in (ROOT / "data" / "examples.jsonl").read_text().splitlines() if l.strip()}
+    ids = json.loads((ROOT / "data" / "splits.json").read_text())["test"]
+    return {i: ex[i]["gold"] for i in ids if i in ex}
+
+
+def load(run_dir: str, missing_wrong: bool = False) -> dict[str, dict]:
+    """{example id (from filename, which is authoritative): {gold, pred}}
+    With missing_wrong, ids absent from the run are added with a sentinel
+    prediction, so an incomplete run is scored as if it got them wrong."""
     d = Path(run_dir)
     d = d if d.is_absolute() else ROOT / d
     out = {}
@@ -48,6 +57,12 @@ def load(run_dir: str) -> dict[str, dict]:
             "gm": f"{g['edge']}|{g['fault_side']}|{g['failure_mode']}",
             "pm": f"{p['edge']}|{p['fault_side']}|{p['failure_mode']}",
         }
+    if missing_wrong:
+        for i, g in gold_rows().items():
+            if i not in out:
+                gc = f"{g['edge']}|{g['fault_side']}"
+                out[i] = {"gc": gc, "pc": "(missing)",
+                          "gm": f"{gc}|{g['failure_mode']}", "pm": "(missing)"}
     return out
 
 
@@ -75,6 +90,8 @@ def main() -> None:
     ap.add_argument("--run", action="append", help="Name=path/to/run_dir (repeatable; repeat a Name for multiple runs)")
     ap.add_argument("--b", type=int, default=2000, help="bootstrap resamples (default 2000)")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--missing-wrong", action="store_true",
+                    help="score ids missing from a run as incorrect (for incomplete runs)")
     a = ap.parse_args()
     runs = [tuple(s.split("=", 1)) for s in a.run] if a.run else PAPER_RUNS
 
@@ -82,7 +99,7 @@ def main() -> None:
     print(f"{'Judge':18}{'run':44}{'N':>4}  " + "  ".join(f"{n:>20}" for n in NAMES))
     by_judge: dict[str, list[tuple[str, dict, np.ndarray]]] = defaultdict(list)
     for name, path in runs:
-        data = load(path)
+        data = load(path, a.missing_wrong)
         rows = [data[k] for k in sorted(data, key=lambda s: int(s[1:]))]
         point, lo, hi = bootstrap(rows, a.b, a.seed)
         by_judge[name].append((path, data, point))
