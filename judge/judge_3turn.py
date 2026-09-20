@@ -227,6 +227,7 @@ async def label(
         allowed_tools=allowed_tools,
         model=real_model,
         max_turns=max_turns,
+        max_buffer_size=64 * 1024 * 1024,
         permission_mode="bypassPermissions",
         hooks={"PreToolUse": [HookMatcher(hooks=[_block_answer_key])]},
         env=env,
