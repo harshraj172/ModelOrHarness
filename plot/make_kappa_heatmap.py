@@ -26,6 +26,10 @@ DIRS = {
     "Opus-4.6": HERE.parent / "predictions/claude-opus-4-6_3turn_base__20260618-160352/dossiers",
     "Opus-4.7": HERE.parent / "predictions/claude-opus-4-7_3turn_base__20260618-160352/dossiers",
     "Opus-4.8": HERE.parent / "predictions/opus-4.8_3turn_base__20260618-224835/dossiers",
+    "Gemini-3.1-Pro": HERE.parent / "predictions/gemini-3.1-pro-max_3turn_base__20260919-062335/dossiers",
+    "Grok-4.6": HERE.parent / "predictions/grok-4.6-max_3turn_base__20260919-062335/dossiers",
+    "GPT-6-Astra": HERE.parent / "predictions/gpt-6-astra-max_3turn_base__20260919-082408/dossiers",
+    "Fable-5.1": HERE.parent / "predictions/claude-fable-5-1_3turn_base__20260919-092955/dossiers",
 }
 RATERS = ["human", *DIRS]
 

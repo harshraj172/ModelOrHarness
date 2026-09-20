@@ -1,0 +1,258 @@
+{
+ "id": "E37",
+ "gold": {
+  "edge": "env (external) — model",
+  "fault_side": "env",
+  "failure_mode": "Service Failure",
+  "vulnerability": "none"
+ },
+ "pred": {
+  "edge": "env (external) — model",
+  "fault_side": "env",
+  "failure_mode": "Service Failure",
+  "category": "env (external) — model (fault: env)"
+ },
+ "evidence": "The main OpenClaw session completed its tool calls, then made a follow-up LLM request to generate text from those tool results. That request hit an external provider failure recorded as `⚠️ API rate limit reached` and `FailoverError: ⚠️ API rate limit reached.` The user-facing symptom was a silent empty assistant turn because OpenClaw later treated the errored embedded run as `kind: \"success\"` with no text.",
+ "reasoning": "On audit, judging note 6 directly changes the classification: when the source genuinely fails with a rate limit, 503, timeout, or similar external block, the root is Service Failure even if a wrapper later masks it as a silent success. The OpenClaw post-run handling bug explains the terminal silent-response symptom, but the first failure in the chronological chain was the upstream LLM API rate-limit failure after tool calls. This is therefore not Mistranslation, because Mistranslation is reserved for the reverse case where the source succeeds and the integration layer corrupts good output.",
+ "confidence": "high",
+ "changed": true,
+ "pre_reflection": {
+  "category": "model — tool (fault: tool)",
+  "failure_mode": "Mistranslation"
+ },
+ "dossier": "I read GitHub issue `openclaw/openclaw#36142` and its visible issue timeline.\n\n## Chronological account of the reported agent failure\n\n### 1. Setup before the failing turn\n\nThe report concerns OpenClaw version **2026.3.3**, using model:\n\n- `anthropic/claude-opus-4-6`\n\nThe channel was **Discord**.\n\nThe triggering condition described in the issue was running multiple concurrent Opus-powered sessions:\n\n> “Run multiple concurrent sub-agents (e.g., 5+ opus sessions) that consume API rate limit quota”\n\nSo, before the failing main-session turn, several sub-agents were already active and consuming the same LLM API quota.\n\n### 2. The main session received a tool-using task\n\nIn the main session, the user initiated a turn that required tools. The issue gives examples of tool types:\n\n> “trigger a turn that involves tool calls (exec, read, etc.)”\n\nThe issue does not include the exact user prompt or the specific file/command involved. The observable fact provided is that the assistant turn was one where the agent needed to call tools before producing its final response.\n\n### 3. Tool calls completed successfully\n\nThe report says the tool phase itself finished:\n\n> “Tool calls complete successfully”\n\nThe user-facing UI showed the tool-call results. The issue states:\n\n> “The user sees tool call results in the UI but no assistant text.”\n\nSo, up to this point, the agent had made tool calls such as `exec` or `read`, and those tool calls returned results visible to the user.\n\n### 4. OpenClaw attempted the follow-up LLM call\n\nAfter the tools completed, OpenClaw made another LLM request so the model could generate the natural-language assistant response from the tool results.\n\nThe reproduction steps describe this as:\n\n> “The next LLM call (to generate text response from tool results) hits API rate limit”\n\nThis is the point in the turn after tool execution but before any final assistant text was delivered.\n\n### 5. The LLM provider returned a rate-limit error\n\nThe issue says the post-tool-call model request received a rate-limit or overload error, specifically mentioning HTTP 429/rate limiting:\n\n> “When the LLM API returns a rate limit (429) or overload error **after tool calls have already completed** in a turn…”\n\nThe included gateway/diagnostic logs show the error that OpenClaw recorded internally:\n\n```text\n[agent/embedded] embedded run agent end: isError=true error=⚠️ API rate limit reached.\n[diagnostic] lane task error: lane=main error=\"FailoverError: ⚠️ API rate limit reached.\"\n```\n\nSo OpenClaw did receive internal signals that the embedded agent run ended with an error and that the main lane task encountered a `FailoverError`.\n\n### 6. No assistant message was delivered to the user\n\nDespite the internal error logs, the user did not receive a visible assistant response explaining the problem.\n\nThe reported result was:\n\n> “Empty assistant response — no text, no error, conversation appears dead”\n\nThe actual behavior section says:\n\n> “Completely silent/empty assistant turn. The user sees tool call results in the UI but no assistant text. No error is logged to the chat.”\n\nThe issue also states:\n\n> “No corresponding user-facing message was delivered.”\n\nThe expected behavior was that the user should have seen a message such as:\n\n> “⚠️ API rate limit reached mid-turn — the model couldn't generate a response after tool calls completed. Please try again in a moment.”\n\nBut instead, the assistant turn ended with no final text.\n\n### 7. The issue reporter identified the relevant OpenClaw code path\n\nThe issue points to:\n\n```text\nsrc/auto-reply/reply/agent-runner-execution.ts\n```\n\nThe reporter wrote that the post-run error handling in that file only checked for context overflow errors, referencing prior issue `#26905`.\n\nThe issue states that rate-limit and overload errors occurring after tool calls were not caught by that post-run path, and that the run could return:\n\n```text\nkind: \"success\"\n```\n\nwith no text payload.\n\nThe issue contrasts this with an earlier-stage path:\n\n> “The pre-tool-call error path (`\"Embedded agent failed before reply\"`) handles rate limits correctly, but the mid-turn path does not.”\n\nObservable from the issue: the reported failure was specifically in the mid-turn/post-tool-call path, not before any reply/tool work had begun.\n\n### 8. The immediate visible outcome for the user\n\nThe user experienced a conversation state where:\n\n- tool results were visible,\n- there was no assistant final message,\n- no rate-limit message appeared in chat,\n- the conversation appeared stuck or dead.\n\nThe title of the issue summarizes this as:\n\n> “Silent empty response when LLM rate limit hits mid-turn (after tool calls)”\n\n### 9. Issue activity after the report\n\nThe issue was opened by `JaewookYou` on **2026-03-05T12:55:31Z**.\n\nSeveral comments followed:\n\n1. **2026-03-05T13:12:06Z — Sid-Qin**\n   - Commented that a fix had been submitted in PR `#36169`.\n   - Said it extended the embedded-error guard in `agent-runner-execution.ts` to recognize rate-limit and overload messages and surface an informative message instead of an empty response.\n   - This comment was marked with `minimizedReason: \"SPAM\"` in the embedded GitHub issue data.\n\n2. **2026-03-05T13:28:49Z — RealKai42**\n   - Commented that the issue was fixed in PR `#36193`.\n   - Restated that the post-run embedded error guard only checked context overflow.\n   - Said rate-limit and overload errors after tool calls could fall through and return `kind: \"success\"` with empty payloads.\n   - Said the fix extended the guard to catch `isRateLimitErrorMessage` / `isOverloadedErrorMessage` when no payload text exists.\n\n3. **2026-03-05T14:19:27Z — openperf**\n   - Commented that a fix had been opened in PR `#36206`.\n   - Listed a fix summary:\n     - widen embedded-error handling for rate-limit, overload, generic, and empty-message cases,\n     - flush `blockReplyPipeline`,\n     - drain `pendingToolTasks`,\n     - bound the drain with a 5-second timeout,\n     - add a catch-all return for embedded errors with empty or undefined messages.\n   - Named the changed file as `src/auto-reply/reply/agent-runner-execution.ts`.\n\nThere were also several later referenced events from commits/PRs, including one commit titled:\n\n```text\nfix: surface rate limit errors mid-turn instead of silent empty response (closes #36142)\n```\n\n### 10. Final issue state\n\nOn **2026-04-17**, the bot `openclaw-barnacle` commented:\n\n> “This issue has been automatically marked as stale due to inactivity.  \n> Please add updates or it will be closed.”\n\nThe issue received the label:\n\n```text\nstale\n```\n\nOn **2026-04-22**, the same bot commented:\n\n> “Closing due to inactivity.  \n> If this is still an issue, please retry on the latest OpenClaw release and share updated details.  \n> If you are absolutely sure it still happens on the latest release, open a new issue with fresh repro steps.”\n\nThe issue is currently shown as:\n\n- **State:** closed\n- **State reason:** not planned\n- **Locked:** true\n- **Label:** `stale`\n\nSo the final recorded outcome in the issue is that the reported silent-empty-response behavior was closed as stale/not planned after inactivity, despite several comments and referenced PRs/commits claiming fixes or attempted fixes.",
+ "trajectory": [
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "WebFetch",
+   "input": "{'url': 'https://github.com/openclaw/openclaw/issues/36142', 'prompt': 'Extract the full issue content, including title, body, comments, links, any logs or trajectory details relevant to the agent failure. Be thorough and chronological; include quoted snippets where important.'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "## GitHub Issue Extract: openclaw/openclaw #36142\n\n**Repository:** `openclaw/openclaw`  \n**Issue:** #36142  \n**Title:** “Silent empty response when LLM rate limit hits mid-turn (after tool calls)”  \n**Status:** Closed as not planned  \n**Label:** `stale` — marked due to inactivity  \n**Opened by:** JaewookYou  \n**Opened on:** Mar 5, 2026  \n**Issue link:** `/openclaw/openclaw/issues/36142`\n\n---\n\n## Chronological Content\n\n### 1. Reported Problem\n\nThe reporter describes a bug where an assistant turn becomes blank if the LLM provider returns a rate-limit or overload error after tool calls have already succeeded.\n\nImportant quoted snippet:\n\n> “the assistant response is completely empty/silent”\n\nThe visible effect is that the user can see tool-call output, but no assistant message follows, making the conversation appear stuck.\n\n---\n\n### 2. Reproduction Steps\n\nThe issue lists this failure path:\n\n1. Start several concurrent sub-agents, such as 5 or more Opus sessions.\n2. In the main session, initiate a turn requiring tools such as `exec` or `read`.\n3. The tool calls finish successfully.\n4. The next model request, intended to summarize or respond to the tool results, hits a 429/rate-limit condition.\n5. The assistant produces no text.\n\nKey quoted result:\n\n> “Empty assistant response — no text, no error, conversation appears dead”\n\n---\n\n### 3. Expected Behavior\n\nThe reporter expects the user to receive a visible error explaining that rate limiting happened after tools had already run.\n\nExample user-facing message from the issue:\n\n> “API rate limit reached mid-turn”\n\nThe full intended meaning is that the model could not generate the final response after tool execution, and the user should retry later.\n\n---\n\n### 4. Actual Behavior\n\nThe assistant turn is blank. The user sees previous tool outputs but receives no natural-language explanation or error message.\n\nKey quoted snippet:\n\n> “Completely silent/empty assistant turn.”\n\n---\n\n### 5. Suspected Root Cause\n\nThe issue points to:\n\n`s",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nimport urllib.request, json\\nurl='https://api.github.com/repos/openclaw/openclaw/issues/36142'\\nreq=urllib.request.Request(url, headers={'Accept':'application/vnd.github+json','User-Agent':'claude-agent'})\\ntry:\\n    with urllib.request.urlopen(req, timeout=20) as r:\\n        data=json.load(r)\\n    print(json.dumps({k:data.get(k) for k in ['html_url','title','state','created_at','updated_at','closed_at','user','labels','body','comments']}, indent=2))\\nexcept Exception as e:\\n    print(type(e).__name__, e)\\nPY\", 'description': 'Fetch issue details from GitHub API'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "HTTPError HTTP Error 403: rate limit exceeded",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"curl -L -H 'User-Agent: claude-agent' -H 'Accept: application/vnd.github.raw+json' https://github.com/openclaw/openclaw/issues/36142 -o /tmp/issue36142.html && python3 - <<'PY'\\nfrom pathlib import Path\\np=Path('/tmp/issue36142.html')\\nprint('bytes', p.stat().st_size)\\nprint(p.read_text(errors='ignore')[:2000])\\nPY\", 'description': 'Download issue page HTML for inspection', 'timeout': 60000}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Exit code 23\n  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current\n                                 Dload  Upload   Total   Spent    Left  Speed\n\r  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0\r  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0\nWarning: Failed to create the file /tmp/issue36142.html: Permission denied",
+   "is_error": true
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"pwd && python3 - <<'PY'\\nimport os, tempfile\\nprint('tmpdir', tempfile.gettempdir(), os.access(tempfile.gettempdir(), os.W_OK))\\nprint('cwd writable', os.access(os.getcwd(), os.W_OK))\\nPY\", 'description': 'Check writable directories'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "/tmp/taxjudge-gh96wkls\ntmpdir /tmp True\ncwd writable True",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"curl -L -H 'User-Agent: claude-agent' https://github.com/openclaw/openclaw/issues/36142 -o issue36142.html && python3 - <<'PY'\\nfrom pathlib import Path\\np=Path('issue36142.html')\\nprint('bytes', p.stat().st_size)\\nprint(p.read_text(errors='ignore')[:2000])\\nPY\", 'description': 'Download issue page HTML for inspection', 'timeout': 60000}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current\n                                 Dload  Upload   Total   Spent    Left  Speed\n\r  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0\r  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0\r100  288k    0  288k    0     0   285k      0 --:--:--  0:00:01 --:--:--  285k\nbytes 294980\n\n\n\n\n  \n\n<!DOCTYPE html>\n<html\n  lang=\"en\"\n  \n  data-color-mode=\"auto\" data-light-theme=\"light\" data-dark-theme=\"dark\"\n  data-a11y-animated-images=\"system\" data-a11y-link-underlines=\"true\"\n  \n  >\n\n\n\n\n  <head>\n    <meta charset=\"utf-8\">\n  <link rel=\"dns-prefetch\" href=\"https://github.githubassets.com\">\n  <link rel=\"dns-prefetch\" href=\"https://avatars.githubusercontent.com\">\n  <link rel=\"dns-prefetch\" href=\"https://github-cloud.s3.amazonaws.com\">\n  <link rel=\"dns-prefetch\" href=\"https://user-images.githubusercontent.com/\">\n  <link rel=\"preconnect\" href=\"https://github.githubassets.com\" crossorigin>\n  <link rel=\"preconnect\" href=\"https://avatars.githubusercontent.com\">\n\n<script type=\"importmap\">{\"imports\":{\"react\":\"https://github.githubassets.com/assets/react-e27d1b3e03961e68.js\",\"react-dom\":\"https://github.githubassets.com/assets/react-dom-e5fd46a22d5c4058.js\",\"react-dom/client\":\"https://github.githubassets.com/assets/react-dom-client-1b4a3ee065998cea.js\",\"react-is\":\"https://github.githubassets.com/assets/react-is-e0b593954b4706d8.js\",\"react-reconciler\":\"https://github.githubassets.com/assets/react-reconciler-8e99e505c4429605.js\",\"react/compiler-runtime\":\"https://github.githubassets.com/assets/react-compiler-runtime-4610bd6d3de9c049.js\",\"react/jsx-dev-runtime\":\"https://github.githubassets.com/assets/react-jsx-dev-runtime-ea55d68667d559e5.js\",\"react/jsx-runtime\":\"https://github.githubassets.com/assets/react-jsx-runtime-4915cb0f5b3aff04.js\",\"scheduler\":\"https://github.githubassets.com/assets/scheduler-58b860b049ca307c.js\"}}</script>\n<meta name=\"react-profiling\" content=",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Grep",
+   "input": "{'pattern': 'Silent empty response|API rate limit|embedded run|Completely silent|OpenClaw version|Expected|Actual|Repro|36142', 'path': '/tmp/taxjudge-gh96wkls/issue36142.html', 'output_mode': 'content', 'context': 2, 'head_limit': 80}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "211-\n212-\n213:  <title>Silent empty response when LLM rate limit hits mid-turn (after tool calls) · Issue #36142 · openclaw/openclaw · GitHub</title>\n214-\n215-\n--\n265-    <link rel=\"fluid-icon\" href=\"https://github.com/fluidicon.png\" title=\"GitHub\">\n266-    <meta property=\"fb:app_id\" content=\"1401488693436528\">\n267:    <meta name=\"apple-itunes-app\" content=\"app-id=1477376905, app-argument=https://github.com/_view_fragments/issues/show/openclaw/openclaw/36142/issue_layout\" />\n268-\n269:[Omitted long matching line]\n270:[Omitted long matching line]\n271-  \n272-\n--\n289-\n290-      <meta name=\"voltron-timing\" value=\"829\">\n291:[Omitted long matching line]\n292-  <meta name=\"go-import\" content=\"github.com/openclaw/openclaw git https://github.com/openclaw/openclaw.git\">\n293-\n--\n297-\n298-\n299:      <link rel=\"canonical\" href=\"https://github.com/openclaw/openclaw/issues/36142\" data-turbo-transient>\n300-\n301-\n--\n378->\n379-  \n380:[Omitted long matching line]\n381:[Omitted long matching line]\n382-</react-partial>\n383-\n--\n521-\n522-  <li>\n523:[Omitted long matching line]\n524-[Omitted long context line]\n525-</svg>Notifications\n--\n529-\n530-  <li>\n531:[Omitted long matching line]\n532-    <path d=\"M5 5.372v.878c0 .414.336.75.75.75h4.5a.75.75 0 0 0 .75-.75v-.878a2.25 2.25 0 1 1 1.5 0v.878a2.25 2.25 0 0 1-2.25 2.25h-1.5v2.128a2.251 2.251 0 1 1-1.5 0V8.5h-1.5A2.25 2.25 0 0 1 3.5 6.25v-.878a2.25 2.25 0 1 1 1.5 0ZM5 3.25a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Zm6.75.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm-3 8.75a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Z\"></path>\n533-</svg>Fork\n--\n538-  <li>\n539-        <div data-view-component=\"true\" class=\"BtnGroup d-flex\">\n540:[Omitted long matching line]\n541-    <path d=\"M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Zm0 2.445L6.615 5.5a.75.75 0 0 1-.564.41l-3.097.",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Read",
+   "input": "{'file_path': '/tmp/taxjudge-gh96wkls/issue36142.html', 'offset': 819, 'limit': 140}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "File content (31593 tokens) exceeds maximum allowed tokens (25000). Use offset and limit parameters to read specific portions of the file, or search for specific content instead of reading the whole file.",
+   "is_error": true
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nfrom pathlib import Path\\nfrom html.parser import HTMLParser\\nhtml=Path('issue36142.html').read_text(errors='ignore')\\n# print around the known lines by finding first phrase and slicing\\nphrase='When the LLM API returns'\\ni=html.find(phrase)\\nprint('idx', i)\\nprint(html[i-2000:i+10000])\\nPY\", 'description': 'Extract issue body HTML around main text', 'timeout': 60000}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "idx 33895\naw · GitHub</title>\n\n\n\n  <meta name=\"route-pattern\" content=\"/_view_fragments/issues/show/:user_id/:repository/:id/issue_layout(.:format)\" data-turbo-transient>\n  <meta name=\"route-controller\" content=\"voltron_issues_fragments\" data-turbo-transient>\n  <meta name=\"route-action\" content=\"issue_layout\" data-turbo-transient>\n  <meta name=\"fetch-nonce\" content=\"v2:19747b53-32cb-4b7a-b4b9-b320ac73a19d\">\n\n    \n  <meta name=\"current-catalog-service-hash\" content=\"81bb79d38c15960b92d99bca9288a9108c7a47b18f2423d0f6438c5b7bcd2114\">\n\n\n  <meta name=\"request-id\" content=\"2571:27F5E9:2C89B29:2E87087:6AAE7738\" data-pjax-transient=\"true\"/><meta name=\"html-safe-nonce\" content=\"1dfdd49025e66e963798bdb58dfaebbf485509ac25d24fcceacd03795648ccaa\" data-pjax-transient=\"true\"/><meta name=\"visitor-payload\" content=\"eyJyZWZlcnJlciI6IiIsInJlcXVlc3RfaWQiOiIyNTcxOjI3RjVFOToyQzg5QjI5OjJFODcwODc6NkFBRTc3MzgiLCJ2aXNpdG9yX2lkIjoiMzU1NTcxMjMxNzAwNjk2ODYzMiIsInJlZ2lvbl9lZGdlIjoic2VhIiwicmVnaW9uX3JlbmRlciI6InNlYSJ9\" data-pjax-transient=\"true\"/><meta name=\"visitor-hmac\" content=\"42162c165e409687f6d38365eb38969c97796f759a6decfa460828a74469c9d3\" data-pjax-transient=\"true\"/>\n\n\n    <meta name=\"hovercard-subject-tag\" content=\"issue:4028056836\" data-turbo-transient>\n\n\n  <meta name=\"github-keyboard-shortcuts\" content=\"repository,issues,copilot\" data-turbo-transient=\"true\" />\n  \n\n  <meta name=\"selected-link\" value=\"repo_issues\" data-turbo-transient>\n  <link rel=\"assets\" href=\"https://github.githubassets.com/\">\n\n    <meta name=\"google-site-verification\" content=\"Apib7-x98H0j5cPqHWwSMm6dNU4GmODRoqxLiDzdx9I\">\n\n<meta name=\"octolytics-url\" content=\"https://collector.github.com/github/collect\" />\n\n\n\n\n\n  <meta name=\"analytics-location\" content=\"/&lt;user-name&gt;/&lt;repo-name&gt;/voltron/issues_fragments/issue_layout\" data-turbo-transient=\"true\" />\n\n  \n\n\n\n\n    <meta name=\"user-login\" content=\"\">\n\n  \n\n    <meta name=\"viewport\" content=\"width=device-width\">\n\n    \n\n      <meta name=\"description\" content=\"Bug De",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Grep",
+   "input": "{'pattern': 'timeline-comment|js-comment-body|comment-body|author-association|stale|Closed as not planned|No corresponding|PR incoming|This issue', 'path': '/tmp/taxjudge-gh96wkls/issue36142.html', 'output_mode': 'content', 'context': 2, 'head_limit': 200}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "60-  \n61-\n62:[Omitted long matching line]\n63-<script crossorigin=\"anonymous\" type=\"module\" src=\"https://github.githubassets.com/assets/high-contrast-cookie-e3d808ee18eb9784.js\"></script>\n64-<link crossorigin=\"anonymous\" rel=\"modulepreload\" href=\"https://github.githubassets.com/assets/wp-runtime-022b60c7cc3da46b.js\" />\n--\n289-\n290-      <meta name=\"voltron-timing\" value=\"829\">\n291:[Omitted long matching line]\n292-  <meta name=\"go-import\" content=\"github.com/openclaw/openclaw git https://github.com/openclaw/openclaw.git\">\n293-\n--\n384-\n385-\n386:      <div hidden=\"hidden\" data-view-component=\"true\" class=\"js-stale-session-flash stale-session-flash flash flash-warn flash-full\">\n387-  \n388-        <svg aria-hidden=\"true\" data-component=\"Octicon\" height=\"16\" viewBox=\"0 0 16 16\" version=\"1.1\" width=\"16\" data-view-component=\"true\" class=\"octicon octicon-alert\">\n389-    <path d=\"M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0 1 14.082 15H1.918a1.75 1.75 0 0 1-1.543-2.575Zm1.763.707a.25.25 0 0 0-.44 0L1.698 13.132a.25.25 0 0 0 .22.368h12.164a.25.25 0 0 0 .22-.368Zm.53 3.996v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 11a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z\"></path>\n390-</svg>\n391:        <span class=\"js-stale-session-flash-signed-in\" hidden>You signed in with another tab or window. <a class=\"Link--inTextBlock\" href=\"\">Reload</a> to refresh your session.</span>\n392:        <span class=\"js-stale-session-flash-signed-out\" hidden>You signed out in another tab or window. <a class=\"Link--inTextBlock\" href=\"\">Reload</a> to refresh your session.</span>\n393:        <span class=\"js-stale-session-flash-switched\" hidden>You switched accounts on another tab or window. <a class=\"Link--inTextBlock\" href=\"\">Reload</a> to refresh your session.</span>\n394-\n395-    <button id=\"icon-button-2315cce8-fb49-49b4-b126-28d2bad6affc\" aria-labelledby=\"tooltip-308bc958-5dac-4f6b-b336-4d38a0c67a10\" type=\"button\" data-view-component=\"true\" class=\"Button Button--iconOnly Button--invisibl",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"gh api repos/openclaw/openclaw/issues/36142 --jq '{title,state,created_at,updated_at,closed_at,body,comments,user:.user.login,labels:[.labels[].name]}'\", 'description': 'Fetch issue via GitHub CLI', 'timeout': 60000}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "Exit code 1\n{\r\n  \"message\": \"Bad credentials\",\r\n  \"documentation_url\": \"https://docs.github.com/rest\",\r\n  \"status\": \"401\"\r\n}gh: Bad credentials (HTTP 401)",
+   "is_error": true
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nfrom pathlib import Path\\nhtml=Path('issue36142.html').read_text(errors='ignore')\\nfor term in ['comment', 'Closed as not planned', 'closed this as not planned', 'stale', 'jaewook', 'Jaewook', 'March', 'Mar']:\\n    print('\\\\nTERM', term)\\n    i=0; c=0\\n    while True:\\n        i=html.lower().find(term.lower(), i)\\n        if i==-1 or c>=10: break\\n        print(i, html[i-120:i+220].replace('\\\\n',' ')[:500])\\n        i+=len(term); c+=1\\nPY\", 'description': 'Search HTML for comments and timeline terms', 'timeout': 60000}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "TERM comment\n9299 we_agent_automation_resource_scoped_writes\",\"copilot_swe_agent_hide_model_picker_if_only_auto\",\"copilot_swe_agent_issue_comment_trigger\",\"copilot_swe_agent_pr_comment_model_picker\",\"copilot_swe_agent_pull_request_comment_trigger\",\"copilot_swe_agent_pull_request_merged_trigger\",\"copilot_swe_agent_pull_request_opened_trigger\",\"copilot_swe_a\n9338 tes\",\"copilot_swe_agent_hide_model_picker_if_only_auto\",\"copilot_swe_agent_issue_comment_trigger\",\"copilot_swe_agent_pr_comment_model_picker\",\"copilot_swe_agent_pull_request_comment_trigger\",\"copilot_swe_agent_pull_request_merged_trigger\",\"copilot_swe_agent_pull_request_opened_trigger\",\"copilot_swe_agent_pull_request_synchronize_trigger\",\n9392 \",\"copilot_swe_agent_issue_comment_trigger\",\"copilot_swe_agent_pr_comment_model_picker\",\"copilot_swe_agent_pull_request_comment_trigger\",\"copilot_swe_agent_pull_request_merged_trigger\",\"copilot_swe_agent_pull_request_opened_trigger\",\"copilot_swe_agent_pull_request_synchronize_trigger\",\"copilot_swe_agent_use_subagents\",\"copilot_task_api_gi\n10528 \"issues_dashboard_sso_structured_errors\",\"issues_expanded_file_types\",\"issues_hide_closed_sub_issues\",\"issues_lazy_load_comment_box_suggestions\",\"issues_react_chrome_container_query_fix\",\"labels_archiving\",\"labels_archiving_info\",\"landing_pages_ninetailed\",\"lifecycle_label_name_updates\",\"marketing_cookie_consent_banner\",\"marketing_pages_s\n39831 \":\"2026-03-05T12:55:31.000Z\",\"interactionStatistic\":{\"@type\":\"InteractionCounter\",\"interactionType\":\"https://schema.org/CommentAction\",\"userInteractionCount\":5},\"url\":\"https://github.com/36142/openclaw/issues/36142\"}</script>    <meta name=\"go-import\" content=\"github.com/openclaw/openclaw git https://github.com/openclaw/openclaw.git\">    \n145385 NavLink-module__title__Q7t0p\"><svg data-component=\"Octicon\" aria-hidden=\"true\" focusable=\"false\" class=\"octicon octicon-comment-discussion NavLink-module__icon__ltGNM\" viewBox=\"0 0 16 16\" width=\"16\" height=\"16\" fill=\"currentColor\" display=\"inline-b",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nfrom pathlib import Path\\nfrom html.parser import HTMLParser\\nimport html as htmllib, json, re\\ns=Path('issue36142.html').read_text(errors='ignore')\\n# show snippets around IssueComment occurrences with unescaped enough\\nfor idx in [m.start() for m in re.finditer(r'IssueComment', s)]:\\n    print('--- idx',idx,'---')\\n    sn=s[idx-500:idx+2000]\\n    print(sn[:2500])\\nPY\", 'description': 'Inspect embedded IssueComment JSON snippets', 'timeout': 60000}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "--- idx 201102 ---\nH\",\"viewerHasReacted\":false,\"reactors\":{\"totalCount\":0,\"nodes\":[]}},{\"content\":\"HOORAY\",\"viewerHasReacted\":false,\"reactors\":{\"totalCount\":0,\"nodes\":[]}},{\"content\":\"CONFUSED\",\"viewerHasReacted\":false,\"reactors\":{\"totalCount\":0,\"nodes\":[]}},{\"content\":\"HEART\",\"viewerHasReacted\":false,\"reactors\":{\"totalCount\":0,\"nodes\":[]}},{\"content\":\"ROCKET\",\"viewerHasReacted\":false,\"reactors\":{\"totalCount\":0,\"nodes\":[]}},{\"content\":\"EYES\",\"viewerHasReacted\":false,\"reactors\":{\"totalCount\":0,\"nodes\":[]}}],\"pinnedIssueComment\":null,\"viewerCanAssign\":false,\"viewerCanLabel\":false,\"projectItems\":{\"edges\":[],\"pageInfo\":{\"endCursor\":null,\"hasNextPage\":false}},\"viewerCanSetMilestone\":false,\"isPinned\":false,\"viewerCanDelete\":false,\"viewerCanTransfer\":false,\"viewerCanConvertToDiscussion\":false,\"viewerCanLock\":false,\"viewerCanType\":false,\"viewerCanSetFields\":false,\"issueFieldValues\":{\"nodes\":[]},\"subIssuesSummary\":{\"total\":0,\"completed\":0},\"pendingSuggestions\":[],\"frontTimelineItems\":{\"pageInfo\":{\"hasNextPage\":true,\"endCursor\":\"Y3Vyc29yOnYyOpPPAAABnbN2zmgAqjQyOTM1MTEzODM=\"},\"totalCount\":17,\"edges\":[{\"node\":{\"__typename\":\"IssueComment\",\"databaseId\":4004967650,\"viewerDidAuthor\":false,\"issue\":{\"author\":{\"__typename\":\"User\",\"login\":\"JaewookYou\",\"id\":\"MDQ6VXNlcjIzMzkxMzg1\"},\"id\":\"I_kwDOQb6kR87wF0UE\",\"number\":36142,\"locked\":true,\"databaseId\":4028056836},\"author\":{\"__typename\":\"User\",\"login\":\"Sid-Qin\",\"avatarUrl\":\"https://avatars.githubusercontent.com/u/201593046?u=53856f0661366f7c942830356f2f97e7809670cd\\u0026v=4\",\"profileUrl\":\"https://github.com/Sid-Qin\",\"id\":\"U_kgDODAQQ1g\",\"name\":\"Sid\"},\"id\":\"IC_kwDOQb6kR87utvTi\",\"url\":\"https://github.com/openclaw/openclaw/issues/36142#issuecomment-4004967650\",\"createdAt\":\"2026-03-05T13:12:06Z\",\"authorAssociation\":\"CONTRIBUTOR\",\"viewerCanDelete\":false,\"viewerCanMinimize\":false,\"viewerCanUnminimize\":false,\"viewerCanReport\":false,\"viewerCanReportToMaintainer\":false,\"viewerCanBlockFromOrg\":false,\"viewerCanUnblockFromOrg\":false,\"viewerCanBlockPerson",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': 'python3 - <<\\'PY\\'\\nfrom pathlib import Path\\nimport re, json, html\\ns=Path(\\'issue36142.html\\').read_text(errors=\\'ignore\\')\\n# List script application/json snippets lengths and whether contain relevant\\nfor m in re.finditer(r\\'<script type=\"application/json\"[^>]*>(.*?)</script>\\', s, re.S):\\n    content=m.group(1)\\n    if any(term in content for term in [\\'frontTimelineItems\\',\\'IssueComment\\',\\'Silent empty response\\',\\'Bug Description\\']):\\n        print(\\'script at\\', m.start(), \\'len\\', len(content), \\'prefix\\', content[:100])\\n        Path(\\'script_relevant.json\\').write_text(html.unescape(content))\\n        print(\\'wrote\\')\\nPY', 'description': 'Extract embedded issue JSON script', 'timeout': 60000}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "script at 187096 len 64261 prefix {\"payload\":{\"preloaded_records\":{},\"structured_data\":{\"@context\":\"https://schema.org\",\"@type\":\"Discu\nwrote",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nimport json\\nfrom pathlib import Path\\ns=Path('script_relevant.json').read_text()\\ndata=json.loads(s)\\nprint(type(data), data.keys())\\n# recursively find issue title/body and timeline items\\npayload=data.get('payload',{})\\nprint(payload.keys())\\n# print likely keys\\nfor k,v in payload.items():\\n    print(k, type(v).__name__)\\nPY\", 'description': 'Parse extracted issue JSON'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "<class 'dict'> dict_keys(['payload', 'title', 'appPayload'])\ndict_keys(['preloaded_records', 'structured_data', 'best_match_sort_enabled', 'issue_search_type', 'preloadedQueries'])\npreloaded_records dict\nstructured_data dict\nbest_match_sort_enabled bool\nissue_search_type str\npreloadedQueries list",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nimport json\\nfrom pathlib import Path\\nobj=json.loads(Path('script_relevant.json').read_text())\\n# recursively search dict/list paths that have frontTimelineItems\\ndef walk(x,path=''):\\n    if isinstance(x,dict):\\n        if 'frontTimelineItems' in x:\\n            print('FOUND', path, 'keys', x.keys())\\n            issue=x\\n            print('title', issue.get('title'))\\n            print('state', issue.get('state'), issue.get('stateReason'), 'created', issue.get('createdAt'))\\n            print('author', issue.get('author',{}).get('login'))\\n            print('body', issue.get('body','')[:500])\\n            ft=issue['frontTimelineItems']\\n            print('timeline total', ft['totalCount'], 'edges', len(ft['edges']), 'hasNext', ft['pageInfo'])\\n        for k,v in x.items(): walk(v, path+'/'+str(k))\\n    elif isinstance(x,list):\\n        for i,v in enumerate(x): walk(v, path+f'[{i}]')\\nwalk(obj)\\nPY\", 'description': 'Find issue object in extracted JSON'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "FOUND /payload/preloadedQueries[0]/result/data/repository/issue keys dict_keys(['id', 'number', 'viewerCanUpdateMetadata', 'repository', 'updatedAt', 'titleHTML', 'url', 'viewerCanUpdateNext', 'issueType', 'duplicateOf', 'linkedPullRequests', 'agentAssignments', 'closedByPullRequestsReferences', 'labels', 'milestone', 'assignedActors', 'locked', 'viewerCanComment', 'databaseId', 'state', 'stateReason', 'title', 'createdAt', 'viewerDidAuthor', 'author', 'body', 'bodyHTML', 'bodyVersion', 'reactionGroups', 'pinnedIssueComment', 'viewerCanAssign', 'viewerCanLabel', 'projectItems', 'viewerCanSetMilestone', 'isPinned', 'viewerCanDelete', 'viewerCanTransfer', 'viewerCanConvertToDiscussion', 'viewerCanLock', 'viewerCanType', 'viewerCanSetFields', 'issueFieldValues', 'subIssuesSummary', 'pendingSuggestions', 'frontTimelineItems', 'backTimelineItems'])\ntitle Silent empty response when LLM rate limit hits mid-turn (after tool calls)\nstate CLOSED NOT_PLANNED created 2026-03-05T12:55:31Z\nauthor JaewookYou\nbody ## Bug Description\n\nWhen the LLM API returns a rate limit (429) or overload error **after tool calls have already completed** in a turn, the assistant response is completely empty/silent. No error message is shown to the user, no indication of what went wrong, and the conversation appears stuck.\n\n## Steps to Reproduce\n\n1. Run multiple concurrent sub-agents (e.g., 5+ opus sessions) that consume API rate limit quota\n2. In the main session, trigger a turn that involves tool calls (exec, read, etc.)\ntimeline total 17 edges 15 hasNext {'hasNextPage': True, 'endCursor': 'Y3Vyc29yOnYyOpPPAAABnbN2zmgAqjQyOTM1MTEzODM='}",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nimport json\\nfrom pathlib import Path\\nobj=json.loads(Path('script_relevant.json').read_text())\\nissue=obj['payload']['preloadedQueries'][0]['result']['data']['repository']['issue']\\nprint('ISSUE')\\nprint(issue['title'], issue['state'], issue['stateReason'], issue['createdAt'], 'updated', issue['updatedAt'], 'locked', issue['locked'])\\nprint('labels', [e['node']['name'] for e in issue['labels']['edges']])\\nprint('author', issue['author']['login'], issue['author'].get('name'))\\nprint('body:\\\\n'+issue['body'])\\nprint('\\\\nTIMELINE', issue['frontTimelineItems']['totalCount'], 'edges', len(issue['frontTimelineItems']['edges']))\\nfor edge in issue['frontTimelineItems']['edges']:\\n    n=edge['node']; typ=n['__typename']\\n    print('\\\\n--', typ, n.get('createdAt'), 'id', n.get('databaseId'))\\n    if typ=='IssueComment':\\n        print('author', n['author']['login'], n['author'].get('__typename'), 'assoc', n.get('authorAssociation'), 'minimized', n.get('minimizedReason'), 'edited', n.get('lastEditedAt'))\\n        print(n['body'])\\n    elif typ=='ReferencedEvent':\\n        actor=n.get('actor') or {}\\n        print('actor', actor.get('login'), 'willClose', n.get('willCloseSubject'))\\n        c=n.get('commit')\\n        if c:\\n            print('commit', c.get('abbreviatedOid'), c.get('message'), c.get('url'))\\n            print('repo', c.get('repository',{}).get('owner',{}).get('login'), c.get('repository',{}).get('name'))\\n        else:\\n            print('subject', n.get('subject',{}).get('__typename'))\\n    elif typ=='LabeledEvent':\\n        print('actor', n['actor']['login'], 'label', n['label']['name'])\\n    elif typ=='ClosedEvent':\\n        print('actor', n.get('actor',{}).get('login'), 'closer', n.get('closer'))\\n    else:\\n        print(n.keys())\\nPY\", 'description': 'Print issue body and visible timeline items', 'timeout': 60000}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "ISSUE\nSilent empty response when LLM rate limit hits mid-turn (after tool calls) CLOSED NOT_PLANNED 2026-03-05T12:55:31Z updated 2026-04-25T04:18:21Z locked True\nlabels ['stale']\nauthor JaewookYou arang\nbody:\n## Bug Description\n\nWhen the LLM API returns a rate limit (429) or overload error **after tool calls have already completed** in a turn, the assistant response is completely empty/silent. No error message is shown to the user, no indication of what went wrong, and the conversation appears stuck.\n\n## Steps to Reproduce\n\n1. Run multiple concurrent sub-agents (e.g., 5+ opus sessions) that consume API rate limit quota\n2. In the main session, trigger a turn that involves tool calls (exec, read, etc.)\n3. Tool calls complete successfully\n4. The next LLM call (to generate text response from tool results) hits API rate limit\n5. **Result**: Empty assistant response — no text, no error, conversation appears dead\n\n## Expected Behavior\n\nA user-facing error message like:\n> ⚠️ API rate limit reached mid-turn — the model couldn't generate a response after tool calls completed. Please try again in a moment.\n\n## Actual Behavior\n\nCompletely silent/empty assistant turn. The user sees tool call results in the UI but no assistant text. No error is logged to the chat.\n\n## Root Cause\n\nIn `src/auto-reply/reply/agent-runner-execution.ts`, the post-run error handling only checks for context overflow errors (#26905 fix). Rate limit and overload errors that occur mid-turn (after tool calls) are not caught — the run \"completes\" with an embedded error and empty payloads, and the code returns `kind: \"success\"` with no text.\n\nThe pre-tool-call error path (`\"Embedded agent failed before reply\"`) handles rate limits correctly, but the mid-turn path does not.\n\n## Environment\n\n- OpenClaw 2026.3.3\n- Model: anthropic/claude-opus-4-6\n- Trigger: 5+ concurrent sub-agent sessions (opus) + main session tool calls\n- Channel: Discord\n\n## Gateway Error Log Evidence\n\n```\n[agent/embedded] embedded run agent e",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Grep",
+   "input": "{'pattern': 'ClosedEvent|LockedEvent|closed|not planned|Closing due|closedAt|stateReason', 'path': '/tmp/taxjudge-gh96wkls/issue36142.html', 'output_mode': 'content', 'context': 1, 'head_limit': 120}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "61-\n62:[Omitted long matching line]\n63-<script crossorigin=\"anonymous\" type=\"module\" src=\"https://github.githubassets.com/assets/high-contrast-cookie-e3d808ee18eb9784.js\"></script>\n--\n818-  \n819:[Omitted long matching line]\n820:[Omitted long matching line]\n821-<p dir=\"auto\">When the LLM API returns a rate limit (429) or overload error <strong>after tool calls have already completed</strong> in a turn, the assistant response is completely empty/silent. No error message is shown to the user, no indication of what went wrong, and the conversation appears stuck.</p>",
+   "is_error": null
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_use",
+   "name": "Bash",
+   "input": "{'command': \"python3 - <<'PY'\\nimport json, urllib.request\\nfrom pathlib import Path\\n# we have issue node id? id=I_kwDO... GraphQL node id. Try unauth graphQL not possible. Try REST comments with no auth via raw curl maybe maybe only API rate blocked. Use api.github.com?per_page maybe 403. Use page HTML has pageInfo hasNext true.\\n# Print all timeline node typenames and cursor to identify missing back two? already front 15 of total 17 hasNext true means first 15 only. Need fetch? GitHub UI fragments maybe include timeline pagination endpoint.\\nobj=json.loads(Path('script_relevant.json').read_text())\\nissue=obj['payload']['preloadedQueries'][0]['result']['data']['repository']['issue']\\nprint(issue['frontTimelineItems']['pageInfo'])\\nprint('url', issue['url'])\\nprint('closedBy', issue.get('closedByPullRequestsReferences'))\\nprint('linkedPR', issue.get('linkedPullRequests'))\\nprint('closedAt?', issue.get('closedAt'))\\nprint('available keys', [k for k in issue.keys() if 'clos' in k.lower()])\\nPY\", 'description': 'Inspect issue pagination and close-related fields'}"
+  },
+  {
+   "turn": "dossier",
+   "type": "tool_result",
+   "preview": "{'hasNextPage': True, 'endCursor': 'Y3Vyc29yOnYyOpPPAAABnbN2zmgAqjQyOTM1MTEzODM='}\nurl https://github.com/openclaw/openclaw/issues/36142\nclosedBy {'nodes': [{'id': 'PR_kwDOQb6kR87IMRCN', 'number': 36143, 'url': 'https://github.com/openclaw/openclaw/pull/36143', 'state': 'CLOSED', 'databaseId': 3358658701}, {'id': 'PR_kwDOQb6kR87IMja4', 'number': 36169, 'url': 'https://github.com/openclaw/openclaw/pull/36169', 'state': 'CLOSED', 'databaseId': 3358734008}, {'id': 'PR_kwDOQb6kR87IM2vI', 'number': 36193, 'url': 'https://github.com/openclaw/openclaw/pull/36193', 'state': 'CLOSED', 'databaseId': 3358813128}, {'id': 'PR_kwDOQb6kR87INAPe', 'number': 36206, 'url': 'https://github.com/openclaw/openclaw/pull/36206', 'state': 'CLOSED', 'databaseId': 3358852062}, {'id': 'PR_kwDOQb6kR87Kssp0', 'number': 47046, 'url': 'https://github.com/openclaw/openclaw/pull/47046', 'state': 'CLOSED', 'databaseId': 3400714868}]}\nlinkedPR {'nodes': []}\nclosedAt? None\navailable keys ['closedByPullRequestsReferences']",
+   "is_error": false
+  },
+  {
+   "turn": "dossier",
+   "type": "text",
+   "text": "I read GitHub issue `openclaw/openclaw#36142` and its visible issue timeline.\n\n## Chronological account of the reported agent failure\n\n### 1. Setup before the failing turn\n\nThe report concerns OpenClaw version **2026.3.3**, using model:\n\n- `anthropic/claude-opus-4-6`\n\nThe channel was **Discord**.\n\nThe triggering condition described in the issue was running multiple concurrent Opus-powered sessions:\n\n> “Run multiple concurrent sub-agents (e.g., 5+ opus sessions) that consume API rate limit quota”\n\nSo, before the failing main-session turn, several sub-agents were already active and consuming the same LLM API quota.\n\n### 2. The main session received a tool-using task\n\nIn the main session, the user initiated a turn that required tools. The issue gives examples of tool types:\n\n> “trigger a turn that involves tool calls (exec, read, etc.)”\n\nThe issue does not include the exact user prompt or the specific file/command involved. The observable fact provided is that the assistant turn was one where the agent needed to call tools before producing its final response.\n\n### 3. Tool calls completed successfully\n\nThe report says the tool phase itself finished:\n\n> “Tool calls complete successfully”\n\nThe user-facing UI showed the tool-call results. The issue states:\n\n> “The user sees tool call results in the UI but no assistant text.”\n\nSo, up to this point, the agent had made tool calls such as `exec` or `read`, and those tool calls returned results visible to the user.\n\n### 4. OpenClaw attempted the follow-up LLM call\n\nAfter the tools completed, OpenClaw made another LLM request so the model could generate the natural-language assistant response from the tool results.\n\nThe reproduction steps describe this as:\n\n> “The next LLM call (to generate text response from tool results) hits API rate limit”\n\nThis is the point in the turn after tool execution but before any final assistant text was delivered.\n\n### 5. The LLM provider returned a rate-limit error\n\nThe issue says the post-tool-call model request received a rate-limit or overload error, specifically mentioning HTTP 429/rate limiting:\n\n> “When the LLM API returns a rate limit (429) or overload error **after tool calls have already completed** in a turn…”\n\nThe included gateway/diagnostic logs show the error that OpenClaw recorded internally:\n\n```text\n[agent/embedded] embedded run agent end: isError=true error=⚠️ API rate limit reached.\n[diagnostic] lane task error: lane=main error=\"FailoverError: ⚠️ API rate limit reached.\"\n```\n\nSo OpenClaw did receive internal signals that the embedded agent run ended with an error and that the main lane task encountered a `FailoverError`.\n\n### 6. No assistant message was delivered to the user\n\nDespite the internal error logs, the user did not receive a visible assistant response explaining the problem.\n\nThe reported result was:\n\n> “Empty assistant response — no text, no error, conversation appears dead”\n\nThe actual behavior section says:\n\n> “Completely silent/empty assistant turn. The user sees tool call results in the UI but no assistant text. No error is logged to the chat.”\n\nThe issue also states:\n\n> “No corresponding user-facing message was delivered.”\n\nThe expected behavior was that the user should have seen a message such as:\n\n> “⚠️ API rate limit reached mid-turn — the model couldn't generate a response after tool calls completed. Please try again in a moment.”\n\nBut instead, the assistant turn ended with no final text.\n\n### 7. The issue reporter identified the relevant OpenClaw code path\n\nThe issue points to:\n\n```text\nsrc/auto-reply/reply/agent-runner-execution.ts\n```\n\nThe reporter wrote that the post-run error handling in that file only checked for context overflow errors, referencing prior issue `#26905`.\n\nThe issue states that rate-limit and overload errors occurring after tool calls were not caught by that post-run path, and that the run could return:\n\n```text\nkind: \"success\"\n```\n\nwith no text payload.\n\nThe issue contrasts this with an earlier-sta"
+  },
+  {
+   "turn": "judge",
+   "type": "text",
+   "text": "{\"evidence\":\"After several concurrent Opus sub-agent sessions consumed quota, the main OpenClaw session ran a tool-using turn; the tool calls completed and their results were visible. The follow-up LLM request needed to turn those tool results into assistant text hit `⚠️ API rate limit reached`, and logs recorded `embedded run agent end: isError=true` plus a main-lane `FailoverError`. Despite those signals, `agent-runner-execution.ts` treated the post-tool embedded error path as `kind: \\\"success\\\"` with empty payloads, so the user saw tool output followed by no assistant message or error.\",\"reasoning\":\"The first system failure causing the silent response was not the model ignoring feedback or choosing a bad action; the model was not able to produce the final text because the runner/middleware mishandled a logged embedded-agent error. Although an external rate limit precipitated the situation, the rate-limit signal was available and correctly logged, so the classified failure is the integration layer translating an error state into a successful empty assistant turn rather than surfacing it. This is therefore a model–tool boundary defect: the wrapper/middleware conveyed the environment/model-call result unfaithfully, which fits Mistranslation better than env Service Failure or model Tool Recovery Failure.\",\"category\":\"model — tool\",\"subtype\":\"Mistranslation\"}"
+  },
+  {
+   "turn": "reflect",
+   "type": "text",
+   "text": "{\"evidence\":\"The main OpenClaw session completed its tool calls, then made a follow-up LLM request to generate text from those tool results. That request hit an external provider failure recorded as `⚠️ API rate limit reached` and `FailoverError: ⚠️ API rate limit reached.` The user-facing symptom was a silent empty assistant turn because OpenClaw later treated the errored embedded run as `kind: \\\"success\\\"` with no text.\",\"reasoning\":\"On audit, judging note 6 directly changes the classification: when the source genuinely fails with a rate limit, 503, timeout, or similar external block, the root is Service Failure even if a wrapper later masks it as a silent success. The OpenClaw post-run handling bug explains the terminal silent-response symptom, but the first failure in the chronological chain was the upstream LLM API rate-limit failure after tool calls. This is therefore not Mistranslation, because Mistranslation is reserved for the reverse case where the source succeeds and the integration layer corrupts good output.\",\"category\":\"env (external) — model\",\"subtype\":\"Service Failure\",\"changed\":true,\"confidence\":\"high\"}"
+  }
+ ],
+ "leaks": []
+}
