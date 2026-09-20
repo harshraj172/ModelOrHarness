@@ -34,10 +34,21 @@ PAPER_RUNS = [
 ]
 
 
-def load(run_dir: str) -> dict[str, dict]:
-    """{example id (from filename, which is authoritative): {gold, pred}}"""
+def gold_rows() -> dict[str, dict]:
+    """Gold labels for every test id, from data/examples.jsonl + data/splits.json."""
+    ex = {json.loads(l)["id"]: json.loads(l) for l in (ROOT / "data" / "examples.jsonl").read_text().splitlines() if l.strip()}
+    ids = json.loads((ROOT / "data" / "splits.json").read_text())["test"]
+    return {i: ex[i]["gold"] for i in ids if i in ex}
+
+
+def load(run_dir: str, missing_wrong: bool = False) -> dict[str, dict]:
+    """{example id (from filename, which is authoritative): {gold, pred}}
+    With missing_wrong, ids absent from the run are added with a sentinel
+    prediction, so an incomplete run is scored as if it got them wrong."""
     d = Path(run_dir)
     d = d if d.is_absolute() else ROOT / d
+    if not (d / "dossiers").is_dir():
+        raise SystemExit(f"no dossiers/ in {d} (wrong path? run not copied into predictions/?)")
     out = {}
     for f in (d / "dossiers").glob("*.json"):
         x = json.loads(f.read_text())
@@ -48,6 +59,14 @@ def load(run_dir: str) -> dict[str, dict]:
             "gm": f"{g['edge']}|{g['fault_side']}|{g['failure_mode']}",
             "pm": f"{p['edge']}|{p['fault_side']}|{p['failure_mode']}",
         }
+    if missing_wrong:
+        for i, g in gold_rows().items():
+            if i not in out:
+                gc = f"{g['edge']}|{g['fault_side']}"
+                out[i] = {"gc": gc, "pc": "(missing)",
+                          "gm": f"{gc}|{g['failure_mode']}", "pm": "(missing)"}
+    if not out:
+        raise SystemExit(f"no dossiers found in {d}")
     return out
 
 
@@ -75,14 +94,20 @@ def main() -> None:
     ap.add_argument("--run", action="append", help="Name=path/to/run_dir (repeatable; repeat a Name for multiple runs)")
     ap.add_argument("--b", type=int, default=2000, help="bootstrap resamples (default 2000)")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--missing-wrong", action="store_true",
+                    help="score ids missing from a run as incorrect (for incomplete runs)")
     a = ap.parse_args()
     runs = [tuple(s.split("=", 1)) for s in a.run] if a.run else PAPER_RUNS
 
     print(f"95% percentile bootstrap over examples, B={a.b}\n")
+    if a.missing_wrong:
+        print("--missing-wrong: ids absent from a run are scored as a '(missing)' class.\n"
+              "Compare these rows on accuracy and kappa; macro-F1 is not comparable with\n"
+              "the normal rows, because the sentinel adds a class to the macro average.\n")
     print(f"{'Judge':18}{'run':44}{'N':>4}  " + "  ".join(f"{n:>20}" for n in NAMES))
     by_judge: dict[str, list[tuple[str, dict, np.ndarray]]] = defaultdict(list)
     for name, path in runs:
-        data = load(path)
+        data = load(path, a.missing_wrong)
         rows = [data[k] for k in sorted(data, key=lambda s: int(s[1:]))]
         point, lo, hi = bootstrap(rows, a.b, a.seed)
         by_judge[name].append((path, data, point))
@@ -96,14 +121,19 @@ def main() -> None:
             pts = np.array([p for _, _, p in rs])
             cells = "  ".join(f"{m:.2f} +- {s:.2f}".rjust(20) for m, s in zip(pts.mean(0), pts.std(0, ddof=1)))
             print(f"{name:18}{f'{len(rs)} runs':44}{'':>4}  {cells}")
-        print("\nRun-vs-run agreement on category (self-consistency, shared examples):")
+        print("\nRun-vs-run agreement (self-consistency, shared examples):")
         for name, rs in multi.items():
             for (pa, da, _), (pb, db, _) in itertools.combinations(rs, 2):
                 ids = sorted(set(da) & set(db))
-                ya, yb = [da[i]["pc"] for i in ids], [db[i]["pc"] for i in ids]
-                agree = np.mean([x == y for x, y in zip(ya, yb)])
-                print(f"  {name}: {Path(pa).name} vs {Path(pb).name}: "
-                      f"agreement {agree:.2f}, kappa {cohen_kappa_score(ya, yb):.2f} (N={len(ids)})")
+                cells = []
+                for key, lvl in (("pc", "category"), ("pm", "mode")):
+                    ya, yb = [da[i][key] for i in ids], [db[i][key] for i in ids]
+                    agree = np.mean([x == y for x, y in zip(ya, yb)])
+                    k = cohen_kappa_score(ya, yb) if len(set(ya) | set(yb)) > 1 else 1.0
+                    cells.append(f"{lvl}: agreement {agree:.2f}, kappa {k:.2f}")
+                print(f"  {name}: {Path(pa).name} vs {Path(pb).name} (N={len(ids)})")
+                for c in cells:
+                    print(f"      {c}")
 
 
 if __name__ == "__main__":

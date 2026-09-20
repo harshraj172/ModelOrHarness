@@ -7,6 +7,10 @@ those experiments and report the results. The paper's protocol must not change. 
 anything in these instructions can't be followed, stop and ask the user; don't work
 around it.
 
+**Round 2:** if `results/revision_results.md` already exists, the first round is done;
+follow `CLAUDE-2.md` instead, which lists the remaining work and refers back here for
+setup and protocol.
+
 Read `README.md` and `REPRODUCE.md` first. In short: `judge/eval_3turn.py` runs an
 agentic judge (Claude Agent SDK, routed through a LiteLLM proxy) on the 40 examples in
 `data/examples.jsonl`, and writes one timestamped folder per run under `judge/runs/`.
@@ -153,40 +157,26 @@ For each run folder in `judge/runs/`:
 
 Then copy each finished run folder into `predictions/`. Scoring reads only from there.
 
-**Only score complete runs (40/40 dossiers).** The scoring scripts silently score whatever
-dossiers exist, so a partial run gives numbers over a smaller set without warning. If a run
-can't reach 40 after one retry, don't score it: list its missing ids and errors in the
-results file instead. Group runs under one name in `bootstrap_ci.py` only when they use
-the same model id and parameters.
+**Score complete runs (40/40) as the headline numbers.** The scoring scripts silently
+score whatever dossiers exist, so a partial run gives numbers over a smaller set without
+warning. For any run that can't reach 40 after one retry, still report it, but:
+- state N in every row (e.g. "Grok 4.6, N=39"), and
+- add a second row that counts each missing example as incorrect, so nobody can read the
+  score as the result of dropping hard examples.
 
-## Scoring
+List each run's missing ids and their errors. Group runs under one name in
+`bootstrap_ci.py` only when they use the same model id and parameters.
 
-All offline from `predictions/`:
+**Per-class results and confusion matrix** (reviewers asked for both), for every complete
+run:
 
 ```
-# sanity check: must match Table 2 of the paper (GPT-5.5 category kappa = 0.76)
-python3 plot/bootstrap_ci.py
-
-# all judges; a repeated name groups runs -> mean +- sd over runs and run-vs-run kappa
-python3 plot/bootstrap_ci.py \
-  --run GPT-5.5=predictions/gpt-5.5-xhigh_3turn_base__20260618-160352 \
-  --run GPT-5.5=predictions/<new gpt-5.5 run 1> \
-  --run GPT-5.5=predictions/<new gpt-5.5 run 2> \
-  --run Claude-Opus-4.6=predictions/claude-opus-4-6_3turn_base__20260618-160352 \
-  --run Claude-Opus-4.7=predictions/claude-opus-4-7_3turn_base__20260618-160352 \
-  --run Claude-Opus-4.8=predictions/opus-4.8_3turn_base__20260618-224835 \
-  --run <Grok>=predictions/<grok run> \
-  --run <Gemini>=predictions/<gemini run> \
-  --run GPT-6-Astra=predictions/<gpt-6-astra run> \
-  --run Claude-Fable-5.1=predictions/<fable run>
-
-# selective-voting ensemble: the paper's 4 judges plus the 4 new ones (one run each)
-python3 plot/vote_offline.py --dir GPT-5.5=predictions/<dir>/dossiers --dir ...
+python3 plot/per_class.py --run predictions/<run_dir> --csv results/<judge>-mode-confusion.csv
 ```
 
-`bootstrap_ci.py` reports 95% bootstrap CIs over the 40 examples for category accuracy,
-category macro-F1, category Cohen's κ, mode accuracy and mode macro-F1. Scoring matches
-`plot/score_tables.py`.
+It prints per-class precision/recall/F1 with support at the category and failure-mode
+level, flags classes with a single gold example, lists the most frequent confusions, and
+writes the full failure-mode confusion matrix as CSV.
 
 ## Deliverable: `results/revision_results.md`
 
@@ -194,6 +184,8 @@ category macro-F1, category Cohen's κ, mode accuracy and mode macro-F1. Scoring
 - GPT-5.5 consistency: the 3 runs, mean ± sd, and run-vs-run κ
 - the voting table for all 8 judges
 - per run: model id and parameters, date, number of errors/leaks/empty verdicts, git SHA
+- per-class tables and the confusion-matrix CSVs from `plot/per_class.py`, including how
+  many classes have only one gold example
 - any model that was skipped, and why
 
 ## Do not
@@ -201,4 +193,6 @@ category macro-F1, category Cohen's κ, mode accuracy and mode macro-F1. Scoring
 - edit `data/`, `judge/prompts/`, or `judge/taxonomy.py`
 - modify or delete anything already in `predictions/`
 - commit `.env` or print any key
-- push to `main`: commit to a branch named `revision-judges` and tell the user it's ready for review
+- push to `main`. Commit to a branch named `revision-judges` and **push that branch**
+  (`git push -u origin revision-judges`), including the new run folders under
+  `predictions/`, so others can rescore them. Then tell the user it is ready for review.
